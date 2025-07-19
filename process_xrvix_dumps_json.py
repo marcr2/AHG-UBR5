@@ -17,6 +17,15 @@ import matplotlib.dates as mdates
 from collections import deque
 import threading
 
+# --- ADAPTIVE WORKER MANAGER ---
+try:
+    from adaptive_worker_manager import get_adaptive_manager, record_request, get_worker_count, get_status, stop_adaptive_manager
+    ADAPTIVE_SCALING_ENABLED = True
+    print("✅ Adaptive worker scaling enabled")
+except ImportError:
+    ADAPTIVE_SCALING_ENABLED = False
+    print("⚠️  Adaptive worker scaling not available, using static configuration")
+
 # --- REQUEST RATE TRACKING ---
 request_count_lock = threading.Lock()
 request_count = 0
@@ -89,22 +98,30 @@ class LiveRatePlot:
         plt.show()
 
 # --- CONFIG ---
-DUMPS = ["biorxiv", "medrxiv"]
+# Import optimized configuration
+try:
+    from processing_config import MAX_WORKERS, BATCH_SIZE, RATE_LIMIT_DELAY, REQUEST_TIMEOUT, MIN_CHUNK_LENGTH, MAX_CHUNK_LENGTH, SAVE_INTERVAL, DUMPS
+    print("✅ Using optimized configuration from processing_config.py")
+except ImportError:
+    print("⚠️  processing_config.py not found, using fallback configuration")
+    # Fallback configuration
+    MAX_WORKERS = 3
+    BATCH_SIZE = 200
+    RATE_LIMIT_DELAY = 0.02
+    REQUEST_TIMEOUT = 60
+    MIN_CHUNK_LENGTH = 50
+    MAX_CHUNK_LENGTH = 8000
+    SAVE_INTERVAL = 1000
+    DUMPS = ["biorxiv", "medrxiv"]
+
 DUMP_ROOT = pkg_resources.resource_filename("paperscraper", "server_dumps")
 EMBEDDINGS_DIR = "xrvix_embeddings"
-# --- EMBEDDING SETTINGS (set manually below) ---
-# You are responsible for not exceeding API rate limits.
-MAX_WORKERS = 3  # Set manually
-BATCH_SIZE = 200  # Set manually
-RATE_LIMIT_DELAY = 0.02  # Set manually (seconds between requests)
-MAX_PAPERS_PER_SEC = 25  # Set manually (not enforced)
-REQUEST_TIMEOUT = 60  # Set manually
-MIN_CHUNK_LENGTH = 50  # Set manually
-MAX_CHUNK_LENGTH = 8000  # Set manually
-SAVE_INTERVAL = 1000  # Set manually
 
 # Rate limiting settings
-MAX_REQUESTS_PER_MINUTE = 1500  # Updated: limit is now 1500 requests/minute
+# Different limits for different API endpoints
+EMBEDDING_MAX_REQUESTS_PER_MINUTE = 1500  # Embedding API: 1500 requests per minute
+GEMINI_MAX_REQUESTS_PER_MINUTE = 1000     # Gemini API: 1000 requests per minute
+MAX_REQUESTS_PER_MINUTE = EMBEDDING_MAX_REQUESTS_PER_MINUTE  # Use embedding limit for processing
 RATE_LIMIT_WINDOW = 60  # seconds
 MAX_RETRIES = 3
 BASE_BACKOFF_DELAY = 1  # seconds
@@ -159,7 +176,17 @@ def get_google_embedding(text, api_key, retry_count=0, skip_base_delay=False):
             time.sleep(RATE_LIMIT_DELAY)
         response = requests.post(url, headers=headers, json=data, timeout=REQUEST_TIMEOUT)
         increment_request_counter()
+        
+        # Record request for adaptive worker manager
+        if ADAPTIVE_SCALING_ENABLED:
+            record_request()
+        
         if response.status_code == 429:
+            # Record rate limit error for immediate scale down
+            if ADAPTIVE_SCALING_ENABLED:
+                from adaptive_worker_manager import get_adaptive_manager
+                get_adaptive_manager().record_rate_limit_error()
+            
             if retry_count < MAX_RETRIES:
                 print(f"⚠️  Rate limited (attempt {retry_count + 1}/{MAX_RETRIES}). Waiting 60s...")
                 time.sleep(60)
@@ -174,6 +201,11 @@ def get_google_embedding(text, api_key, retry_count=0, skip_base_delay=False):
         return None
     except requests.exceptions.RequestException as e:
         if "429" in str(e):
+            # Record rate limit error for immediate scale down
+            if ADAPTIVE_SCALING_ENABLED:
+                from adaptive_worker_manager import get_adaptive_manager
+                get_adaptive_manager().record_rate_limit_error()
+            
             if retry_count < MAX_RETRIES:
                 print(f"⚠️  Rate limited (attempt {retry_count + 1}/{MAX_RETRIES}). Waiting 60s...")
                 time.sleep(60)
@@ -399,6 +431,116 @@ def sequential_process_papers(unprocessed_papers, api_key, current_batch, metada
     
     return db_embeddings, db_chunks, batch_num
 
+def adaptive_parallel_process_papers(unprocessed_papers, api_key, current_batch, metadata, db, batch_num, embeddings_dir, start_time):
+    """Process papers with adaptive worker scaling based on request rates"""
+    db_embeddings = 0
+    db_chunks = 0
+    
+    print(f"🚀 Adaptive parallel processing:")
+    print(f"   Starting workers: {get_worker_count()}")
+    print(f"   Target RPS: 24")
+    print(f"   Will scale automatically every 10 seconds (after 30s warmup)")
+    
+    plot = LiveRatePlot()
+    last_plot_update = time.time()
+    reset_request_counter()
+    
+    # Use a single ThreadPoolExecutor with maximum workers to avoid freezing
+    max_possible_workers = 20  # Maximum workers the adaptive manager can use
+    print(f"   Using single executor with max {max_possible_workers} workers")
+    
+    with ThreadPoolExecutor(max_workers=max_possible_workers) as executor:
+        # Submit all papers at once, but control concurrency through adaptive delays
+        future_to_paper = {}
+        
+        print(f"📤 Submitting {len(unprocessed_papers)} papers to processing queue...")
+        for paper_data in unprocessed_papers:
+            # Use current worker count for rate limiting calculations
+            current_workers = get_worker_count()
+            # Very conservative delay calculation to prevent rate limiting
+            worker_delay = max(RATE_LIMIT_DELAY / max(current_workers, 1), 0.2) if current_workers > 1 else RATE_LIMIT_DELAY
+            future = executor.submit(process_paper_embeddings_optimized, paper_data, api_key, current_workers, worker_delay)
+            future_to_paper[future] = paper_data
+        
+        print(f"✅ All papers submitted. Starting processing...")
+        
+        with tqdm(total=len(unprocessed_papers), desc=f"Processing {db} papers (adaptive)", unit="paper") as pbar:
+            completed_count = 0
+            last_update_time = time.time()
+            
+            for future in as_completed(future_to_paper, timeout=300):  # 5-minute timeout per future
+                paper_data = future_to_paper[future]
+                idx, row, source = paper_data
+                error_429 = False
+                
+                try:
+                    results = future.result(timeout=60)  # 1-minute timeout for result
+                    if results:
+                        for result in results:
+                            current_batch["embeddings"].append(result["embedding"])
+                            current_batch["chunks"].append(result["chunk"])
+                            current_batch["metadata"].append(result["metadata"])
+                            db_embeddings += 1
+                            metadata["total_embeddings"] += 1
+                        if len(current_batch["embeddings"]) >= BATCH_SIZE:
+                            batch_file = save_batch(current_batch, db, batch_num, embeddings_dir)
+                            metadata["batches"][f"{db}_batch_{batch_num:04d}"] = {
+                                "file": batch_file,
+                                "embeddings": len(current_batch["embeddings"]),
+                                "created": datetime.now().isoformat()
+                            }
+                            current_batch = {"embeddings": [], "chunks": [], "metadata": []}
+                            batch_num += 1
+                except Exception as e:
+                    if '429' in str(e):
+                        error_429 = True
+                    print(f"\n⚠️  Error processing paper {idx}: {e}")
+                
+                mark_paper_processed(metadata, db, idx)
+                db_chunks += len(chunk_paragraphs(row.get("abstract", "")))
+                metadata["total_chunks"] += len(chunk_paragraphs(row.get("abstract", "")))
+                
+                completed_count += 1
+                
+                if pbar.n % SAVE_INTERVAL == 0 and pbar.n > 0:
+                    save_metadata(metadata, embeddings_dir)
+                
+                # Update progress bar with adaptive scaling info
+                status = get_status()
+                plot.update(get_requests_per_sec(), error=error_429)
+                pbar.set_postfix({
+                    "req_rate": f"{get_requests_per_sec():.2f} reqs/s",
+                    "workers": f"{status['current_workers']}",
+                    "rps_ratio": f"{status['performance_ratio']:.2f}",
+                    "completed": f"{completed_count}"
+                })
+                pbar.update(1)
+                
+                # Force update every 10 seconds even if no completions
+                current_time = time.time()
+                if current_time - last_update_time > 10:
+                    pbar.set_postfix({
+                        "req_rate": f"{get_requests_per_sec():.2f} reqs/s",
+                        "workers": f"{status['current_workers']}",
+                        "rps_ratio": f"{status['performance_ratio']:.2f}",
+                        "completed": f"{completed_count}",
+                        "waiting": "⏳"
+                    })
+                    last_update_time = current_time
+                
+                if time.time() - last_plot_update > 2:
+                    plot.refresh()
+                    last_plot_update = time.time()
+                
+                # Show scaling status periodically
+                if pbar.n % 50 == 0 and pbar.n > 0:
+                    status = get_status()
+                    print(f"\n📊 Progress update - Workers: {status['current_workers']}, RPS: {status['current_rps']:.1f}, Ratio: {status['performance_ratio']:.2f}")
+    
+    plot.refresh()
+    plot.close()
+    return db_embeddings, db_chunks, batch_num
+
 def optimized_parallel_process_papers(unprocessed_papers, api_key, current_batch, metadata, db, batch_num, embeddings_dir, effective_workers, start_time):
     """Optimized parallel processing that can achieve 5 papers/second while respecting rate limits"""
     db_embeddings = 0
@@ -486,7 +628,7 @@ def process_paper_embeddings_optimized(paper_data, api_key, num_workers, worker_
     if not paragraphs:
         return []
     
-    # For papers with few paragraphs, process sequentially with minimal delay
+    # For papers with few paragraphs, process sequentially with proper delays
     if len(paragraphs) <= 2:
         results = []
         for i, para in enumerate(paragraphs):
@@ -494,7 +636,8 @@ def process_paper_embeddings_optimized(paper_data, api_key, num_workers, worker_
                 # Add worker-specific delay to stagger requests
                 if i > 0:
                     time.sleep(worker_delay)
-                embedding = get_google_embedding(para, api_key, skip_base_delay=True)
+                # Don't skip base delay - use proper rate limiting
+                embedding = get_google_embedding(para, api_key, skip_base_delay=False)
                 if embedding is not None:
                     results.append({
                         "embedding": embedding,
@@ -559,7 +702,8 @@ def get_google_embedding_with_delay(text, api_key, delay_offset=0):
     if delay_offset > 0:
         time.sleep(delay_offset)
     
-    return get_google_embedding(text, api_key, skip_base_delay=True)
+    # Don't skip base delay - use proper rate limiting
+    return get_google_embedding(text, api_key, skip_base_delay=False)
 
 def parallel_process_papers(unprocessed_papers, api_key, current_batch, metadata, db, batch_num, embeddings_dir, effective_workers, start_time):
     """Process papers in parallel with the specified number of workers"""
@@ -858,9 +1002,33 @@ def legacy_sequential_process_xrvix():
     plt.show()
 
 def main():
-    print("=== Starting xrvix Dumps Processing (Multi-File Storage with Parallel Processing) ===")
-    # Removed print_config_info() and any configuration/performance tips printouts
+    print("=== Starting xrvix Dumps Processing (Multi-File Storage with Adaptive Parallel Processing) ===")
+    
+    # Initialize adaptive worker manager if enabled
+    if ADAPTIVE_SCALING_ENABLED:
+        from adaptive_worker_manager import reset_adaptive_manager
+        adaptive_manager = reset_adaptive_manager()  # Reset for clean start
+        print(f"🔧 Adaptive Worker Configuration:")
+        print(f"   Target RPS: {adaptive_manager.target_rps}")
+        print(f"   Scaling interval: {adaptive_manager.scaling_interval}s")
+        print(f"   Max workers: {adaptive_manager.max_workers}")
+        print(f"   Min workers: {adaptive_manager.min_workers}")
+        print(f"   Scale up threshold: {adaptive_manager.scale_up_threshold} (immediate when RPS < 19.2)")
+        print(f"   Scale down threshold: {adaptive_manager.scale_down_threshold} (immediate when RPS > 28.8)")
+        print(f"   Scaling behavior: Immediate up/down based on RPS thresholds")
+        print(f"   Warmup period: {adaptive_manager.warmup_period}s before scaling starts")
+    else:
+        print(f"🔧 Static Processing Configuration:")
+        print(f"   Parallel workers: {MAX_WORKERS}")
+        print(f"   Batch size: {BATCH_SIZE}")
+        print(f"   Rate limit delay: {RATE_LIMIT_DELAY}s")
+        print(f"   Request timeout: {REQUEST_TIMEOUT}s")
+    
+    print(f"   Sources: {', '.join(DUMPS)}")
     print(f"🚦 Rate limiting: {MAX_REQUESTS_PER_MINUTE} requests per {RATE_LIMIT_WINDOW}s")
+    print(f"   - Embedding API: {EMBEDDING_MAX_REQUESTS_PER_MINUTE} requests/minute")
+    print(f"   - Gemini API: {GEMINI_MAX_REQUESTS_PER_MINUTE} requests/minute")
+    print()
     
     # Load API key
     with open("keys.json") as f:
@@ -873,127 +1041,153 @@ def main():
     metadata = load_metadata(EMBEDDINGS_DIR)
     print(f"📊 Loaded metadata: {metadata['total_embeddings']} total embeddings")
 
-    for db in DUMPS:
-        print(f"\n🔄 Processing {db}...")
-        
-        # Create source directory
-        source_dir = os.path.join(EMBEDDINGS_DIR, db)
-        ensure_directory(source_dir)
-        
-        # Find dump file
-        dump_paths = [os.path.join(DUMP_ROOT, f) for f in os.listdir(DUMP_ROOT) if f.startswith(db)]
-        if not dump_paths:
-            print(f"❌ No dump found for {db}, skipping.")
-            continue
+    try:
+        for db in DUMPS:
+            print(f"\n🔄 Processing {db}...")
             
-        path = sorted(dump_paths, reverse=True)[0]
-        print(f"📁 Using dump file: {os.path.basename(path)}")
-        
-        # Load dump
-        querier = XRXivQuery(path)
-        if querier.errored:
-            print(f"❌ Error loading {db} dump, skipping.")
-            continue
+            # Create source directory
+            source_dir = os.path.join(EMBEDDINGS_DIR, db)
+            ensure_directory(source_dir)
             
-        print(f"📊 Found {len(querier.df)} papers in {db}")
-        
-        # Get already processed papers
-        processed_papers = get_processed_papers(metadata, db)
-        print(f"📊 Already processed: {len(processed_papers)} papers")
-        
-        # Filter out already processed papers
-        unprocessed_papers = []
-        for idx, row in querier.df.iterrows():
-            if idx not in processed_papers:
-                unprocessed_papers.append((idx, row, db))
-        
-        print(f"📊 Remaining to process: {len(unprocessed_papers)} papers")
-        
-        if not unprocessed_papers:
-            print(f"✅ All papers for {db} already processed!")
-            continue
-        
-        # Initialize batch tracking
-        current_batch = {
-            "embeddings": [],
-            "chunks": [],
-            "metadata": []
-        }
-        batch_num = get_next_batch_num(db, EMBEDDINGS_DIR)
-        db_embeddings = 0
-        db_chunks = 0
-        
-        print(f"🚀 Starting parallel processing with {MAX_WORKERS} workers...")
-        print(f"⚠️  Note: Reduced workers recommended due to rate limiting")
-        start_time = time.time()
-        
-        # Process papers with the selected profile settings
-        effective_workers = MAX_WORKERS  # Use the full number of workers from the profile
-        
-        # Check if user wants to force parallel processing (bypass automatic fallback)
-        force_parallel = os.environ.get("FORCE_PARALLEL", "false").lower() == "true"
-        
-        # Only apply automatic fallback if not forcing parallel
-        if not force_parallel:
-            # Conservative fallback for very high rate limiting
-            if RATE_LIMIT_DELAY > 2.0:  # Only for extremely conservative profiles
-                print("🐌 Using sequential processing due to very high rate limiting (delay > 2s)")
-                db_embeddings, db_chunks, batch_num = sequential_process_papers(unprocessed_papers, api_key, current_batch, metadata, db, batch_num, EMBEDDINGS_DIR, start_time)
-            else:
-                print(f"🚀 Using parallel processing with {effective_workers} workers (delay: {RATE_LIMIT_DELAY}s)")
-                db_embeddings, db_chunks, batch_num = optimized_parallel_process_papers(unprocessed_papers, api_key, current_batch, metadata, db, batch_num, EMBEDDINGS_DIR, effective_workers, start_time)
-        else:
-            print(f"🚀 FORCING parallel processing with {effective_workers} workers (bypassing automatic fallback)")
-            db_embeddings, db_chunks, batch_num = optimized_parallel_process_papers(unprocessed_papers, api_key, current_batch, metadata, db, batch_num, EMBEDDINGS_DIR, effective_workers, start_time)
-        
-        # Save any remaining embeddings in the current batch
-        if current_batch["embeddings"]:
-            batch_file = save_batch(current_batch, db, batch_num, EMBEDDINGS_DIR)
-            metadata["batches"][f"{db}_batch_{batch_num:04d}"] = {
-                "file": batch_file,
-                "embeddings": len(current_batch["embeddings"]),
-                "created": datetime.now().isoformat()
+            # Find dump file
+            dump_paths = [os.path.join(DUMP_ROOT, f) for f in os.listdir(DUMP_ROOT) if f.startswith(db)]
+            if not dump_paths:
+                print(f"❌ No dump found for {db}, skipping.")
+                continue
+                
+            path = sorted(dump_paths, reverse=True)[0]
+            print(f"📁 Using dump file: {os.path.basename(path)}")
+            
+            # Load dump
+            querier = XRXivQuery(path)
+            if querier.errored:
+                print(f"❌ Error loading {db} dump, skipping.")
+                continue
+                
+            print(f"📊 Found {len(querier.df)} papers in {db}")
+            
+            # Get already processed papers
+            processed_papers = get_processed_papers(metadata, db)
+            print(f"📊 Already processed: {len(processed_papers)} papers")
+            
+            # Filter out already processed papers
+            unprocessed_papers = []
+            for idx, row in querier.df.iterrows():
+                if idx not in processed_papers:
+                    unprocessed_papers.append((idx, row, db))
+            
+            print(f"📊 Remaining to process: {len(unprocessed_papers)} papers")
+            
+            if not unprocessed_papers:
+                print(f"✅ All papers for {db} already processed!")
+                continue
+            
+            # Initialize batch tracking
+            current_batch = {
+                "embeddings": [],
+                "chunks": [],
+                "metadata": []
             }
+            batch_num = get_next_batch_num(db, EMBEDDINGS_DIR)
+            db_embeddings = 0
+            db_chunks = 0
+            
+            start_time = time.time()
+            
+            # Use adaptive worker scaling if enabled
+            if ADAPTIVE_SCALING_ENABLED:
+                print(f"🚀 Starting adaptive parallel processing...")
+                print(f"   Starting with {get_worker_count()} workers")
+                print(f"   Will automatically scale based on request rate")
+                
+                # Process papers with adaptive worker scaling
+                db_embeddings, db_chunks, batch_num = adaptive_parallel_process_papers(
+                    unprocessed_papers, api_key, current_batch, metadata, db, 
+                    batch_num, EMBEDDINGS_DIR, start_time
+                )
+            else:
+                # Use static configuration
+                effective_workers = MAX_WORKERS
+                print(f"🚀 Starting parallel processing with {effective_workers} workers...")
+                
+                # Check if user wants to force parallel processing (bypass automatic fallback)
+                force_parallel = os.environ.get("FORCE_PARALLEL", "false").lower() == "true"
+                
+                # Only apply automatic fallback if not forcing parallel
+                if not force_parallel:
+                    # Conservative fallback for very high rate limiting
+                    if RATE_LIMIT_DELAY > 2.0:  # Only for extremely conservative profiles
+                        print("🐌 Using sequential processing due to very high rate limiting (delay > 2s)")
+                        db_embeddings, db_chunks, batch_num = sequential_process_papers(unprocessed_papers, api_key, current_batch, metadata, db, batch_num, EMBEDDINGS_DIR, start_time)
+                    else:
+                        print(f"🚀 Using parallel processing with {effective_workers} workers (delay: {RATE_LIMIT_DELAY}s)")
+                        db_embeddings, db_chunks, batch_num = optimized_parallel_process_papers(unprocessed_papers, api_key, current_batch, metadata, db, batch_num, EMBEDDINGS_DIR, effective_workers, start_time)
+                else:
+                    print(f"🚀 FORCING parallel processing with {effective_workers} workers (bypassing automatic fallback)")
+                    db_embeddings, db_chunks, batch_num = optimized_parallel_process_papers(unprocessed_papers, api_key, current_batch, metadata, db, batch_num, EMBEDDINGS_DIR, effective_workers, start_time)
+            
+            # Save any remaining embeddings in the current batch
+            if current_batch["embeddings"]:
+                batch_file = save_batch(current_batch, db, batch_num, EMBEDDINGS_DIR)
+                metadata["batches"][f"{db}_batch_{batch_num:04d}"] = {
+                    "file": batch_file,
+                    "embeddings": len(current_batch["embeddings"]),
+                    "created": datetime.now().isoformat()
+                }
+            
+            # Update source statistics
+            total_processed = len(get_processed_papers(metadata, db))
+            metadata["sources"][db] = {
+                "papers": len(querier.df),
+                "processed_papers": total_processed,
+                "chunks": db_chunks,
+                "embeddings": db_embeddings,
+                "batches": batch_num + 1
+            }
+            metadata["total_papers"] += len(querier.df)
+            
+            # Save final metadata for this source
+            save_metadata(metadata, EMBEDDINGS_DIR)
+            
+            processing_time = time.time() - start_time
+            papers_per_second = len(unprocessed_papers) / processing_time if processing_time > 0 else 0
+            
+            print(f"✅ Finished {db}: {db_chunks} chunks processed, {db_embeddings} embeddings created in {batch_num + 1} batches")
+            print(f"⏱️  Processing time: {processing_time/3600:.1f} hours")
+            print(f"🚀 Processing rate: {papers_per_second:.1f} papers/second")
+            
+            # Show adaptive scaling status if enabled
+            if ADAPTIVE_SCALING_ENABLED:
+                status = get_status()
+                print(f"🔧 Final adaptive scaling status:")
+                print(f"   Workers: {status['current_workers']}")
+                print(f"   Average RPS: {status['current_rps']:.1f}")
+                print(f"   Performance ratio: {status['performance_ratio']:.2f}")
         
-        # Update source statistics
-        total_processed = len(get_processed_papers(metadata, db))
-        metadata["sources"][db] = {
-            "papers": len(querier.df),
-            "processed_papers": total_processed,
-            "chunks": db_chunks,
-            "embeddings": db_embeddings,
-            "batches": batch_num + 1
-        }
-        metadata["total_papers"] += len(querier.df)
+        # Print final statistics
+        print(f"\n🎉 All dumps processed!")
+        print(f"📊 Total embeddings: {metadata['total_embeddings']}")
+        print(f"📊 Total chunks: {metadata['total_chunks']}")
+        print(f"📊 Total papers: {metadata['total_papers']}")
+        print(f"📁 Embeddings directory: {os.path.abspath(EMBEDDINGS_DIR)}")
         
-        # Save final metadata for this source
-        save_metadata(metadata, EMBEDDINGS_DIR)
+        # Calculate total file size
+        total_size = 0
+        for root, dirs, files in os.walk(EMBEDDINGS_DIR):
+            for file in files:
+                total_size += os.path.getsize(os.path.join(root, file))
+        print(f"📊 Total size: {total_size / 1024 / 1024:.1f} MB")
         
-        processing_time = time.time() - start_time
-        papers_per_second = len(unprocessed_papers) / processing_time if processing_time > 0 else 0
-        
-        print(f"✅ Finished {db}: {db_chunks} chunks processed, {db_embeddings} embeddings created in {batch_num + 1} batches")
-        print(f"⏱️  Processing time: {processing_time/3600:.1f} hours")
-        print(f"🚀 Processing rate: {papers_per_second:.1f} papers/second")
+        # Print source breakdown
+        print(f"\n📊 Source Breakdown:")
+        for source, stats in metadata["sources"].items():
+            print(f"   {source}: {stats['papers']} papers, {stats.get('processed_papers', 0)} processed, {stats['embeddings']} embeddings, {stats['batches']} batches")
     
-    # Print final statistics
-    print(f"\n🎉 All dumps processed!")
-    print(f"📊 Total embeddings: {metadata['total_embeddings']}")
-    print(f"📊 Total chunks: {metadata['total_chunks']}")
-    print(f"📊 Total papers: {metadata['total_papers']}")
-    print(f"📁 Embeddings directory: {os.path.abspath(EMBEDDINGS_DIR)}")
-    
-    # Calculate total file size
-    total_size = 0
-    for root, dirs, files in os.walk(EMBEDDINGS_DIR):
-        for file in files:
-            total_size += os.path.getsize(os.path.join(root, file))
-    print(f"📊 Total size: {total_size / 1024 / 1024:.1f} MB")
-    
-    # Print source breakdown
-    print(f"\n📊 Source Breakdown:")
-    for source, stats in metadata["sources"].items():
-        print(f"   {source}: {stats['papers']} papers, {stats.get('processed_papers', 0)} processed, {stats['embeddings']} embeddings, {stats['batches']} batches")
+    finally:
+        # Clean up adaptive worker manager
+        if ADAPTIVE_SCALING_ENABLED:
+            stop_adaptive_manager()
+            print("🔧 Adaptive worker manager stopped")
 
 if __name__ == "__main__":
     main() 

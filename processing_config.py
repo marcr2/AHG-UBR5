@@ -3,20 +3,27 @@ Configuration file for optimizing embedding processing performance.
 Adjust these settings based on your system capabilities and API limits.
 """
 
-# --- PARALLEL PROCESSING CONFIG ---
-MAX_WORKERS = 10  # Increased workers to utilize 1500 req/min limit
-# With 1500 requests per minute limit, parallel processing is now much more feasible
-# Adjust MAX_WORKERS based on your system and API stability
+# --- ADAPTIVE WORKER SCALING CONFIGURATION ---
+# Adaptive scaling parameters
+ADAPTIVE_SCALING_ENABLED = True
+INITIAL_MAX_WORKERS = 1
+MAX_WORKERS_LIMIT = 20  # Maximum workers allowed
+MIN_WORKERS = 1
+TARGET_RPS = 24  # Target requests per second
+SCALING_INTERVAL = 10  # Check every 10 seconds (faster response)
+WORKER_SCALE_UP_THRESHOLD = 0.8  # Scale up if RPS < 80% of target (19.2 RPS)
+WORKER_SCALE_DOWN_THRESHOLD = 1.2  # Scale down if RPS > 120% of target (28.8 RPS)
+STABILITY_PERIODS = 3  # Number of stable periods before scaling up again (deprecated - scaling up is now immediate)
 
-# --- API CONFIG ---
-REQUEST_TIMEOUT = 60  # Reduced timeout for higher throughput
-# Increase if you're getting timeout errors
-# Decrease if you want to fail fast on slow requests
-
-# --- BATCHING CONFIG ---
-BATCH_SIZE = 200  # Number of embeddings per file
-# Larger batches = fewer files but more memory usage
-# Smaller batches = more files but less memory usage
+# --- FALLBACK CONFIGURATION (if adaptive scaling is disabled) ---
+# Optimized parallel processing configuration
+MAX_WORKERS = 10  # Number of parallel workers for processing
+BATCH_SIZE = 200  # Number of papers to process in each batch
+RATE_LIMIT_DELAY = 0.04  # Delay between requests (seconds) - optimized for 1500 req/min
+REQUEST_TIMEOUT = 60  # Timeout for API requests (seconds)
+MIN_CHUNK_LENGTH = 50  # Minimum chunk length for text splitting
+MAX_CHUNK_LENGTH = 8000  # Maximum chunk length for text splitting
+SAVE_INTERVAL = 1000  # Save progress every N papers
 
 # --- VECTOR DATABASE CONFIG ---
 DB_BATCH_SIZE = 5000  # Number of embeddings to add to ChromaDB in one operation (max allowed by ChromaDB is 5461)
@@ -29,9 +36,13 @@ MAX_CHUNK_LENGTH = 8000  # Maximum character length for a chunk
 # Google's text-embedding-004 has a limit of ~8000 tokens
 
 # --- RATE LIMITING ---
-RATE_LIMIT_DELAY = 0.04  # 0.04 second delay between requests (1500 req/min = 1 req/0.04s)
-# With 1500 requests per minute limit, we need at least 0.04 seconds between requests
-# This ensures we stay well under the limit
+# Different limits for different API endpoints
+EMBEDDING_MAX_REQUESTS_PER_MINUTE = 1500  # Embedding API: 1500 requests per minute
+GEMINI_MAX_REQUESTS_PER_MINUTE = 1000     # Gemini API: 1000 requests per minute
+RATE_LIMIT_WINDOW = 60  # Rate limiting window in seconds
+
+# Use embedding limit for processing (since that's what we use most)
+MAX_REQUESTS_PER_MINUTE = EMBEDDING_MAX_REQUESTS_PER_MINUTE
 
 # --- MEMORY OPTIMIZATION ---
 SAVE_INTERVAL = 1000  # Save metadata every N papers

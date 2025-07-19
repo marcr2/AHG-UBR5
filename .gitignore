@@ -1,10 +1,26 @@
+# API Keys and sensitive data
 keys.json
+test_metadata.json
+
+# Virtual environments
 AHG/
+
+# IDE and editor files
 .cursor/
 .vscode/
-_pycache_/
+
+# Data directories
 xrvix_embeddings/
-test_metadata.json
+chroma_db/
+pubmed_embeddings.json
+
+# Cache directories
+__pycache__/
+_pycache_/
+
+# Temporary test files
+test_api_key.py
+check_project.py
 
 # VSCode settings
 .vscode/
