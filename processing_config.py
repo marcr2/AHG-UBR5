@@ -39,6 +39,7 @@ MAX_CHUNK_LENGTH = 8000  # Maximum character length for a chunk
 # Different limits for different API endpoints
 EMBEDDING_MAX_REQUESTS_PER_MINUTE = 1500  # Embedding API: 1500 requests per minute
 GEMINI_MAX_REQUESTS_PER_MINUTE = 1000     # Gemini API: 1000 requests per minute
+MAX_BATCH_ENQUEUED_TOKENS = 3_000_000     # Max batch enqueued tokens
 RATE_LIMIT_WINDOW = 60  # Rate limiting window in seconds
 
 # Use embedding limit for processing (since that's what we use most)

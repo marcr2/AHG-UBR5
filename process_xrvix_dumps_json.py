@@ -122,6 +122,7 @@ EMBEDDINGS_DIR = "xrvix_embeddings"
 EMBEDDING_MAX_REQUESTS_PER_MINUTE = 1500  # Embedding API: 1500 requests per minute
 GEMINI_MAX_REQUESTS_PER_MINUTE = 1000     # Gemini API: 1000 requests per minute
 MAX_REQUESTS_PER_MINUTE = EMBEDDING_MAX_REQUESTS_PER_MINUTE  # Use embedding limit for processing
+MAX_BATCH_ENQUEUED_TOKENS = 3_000_000     # Max batch enqueued tokens
 RATE_LIMIT_WINDOW = 60  # seconds
 MAX_RETRIES = 3
 BASE_BACKOFF_DELAY = 1  # seconds
