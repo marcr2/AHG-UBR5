@@ -12,6 +12,8 @@ import random
 import threading
 from collections import deque
 import pandas as pd  # For Excel export
+from openpyxl import load_workbook
+from datetime import datetime
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -445,68 +447,53 @@ class EnhancedRAGQuery:
     def display_results(self, results, show_method=True):
         """Display search results in a formatted way."""
         if not results:
-            print("❌ No results found.")
+            print("[display_results] No results found.")
             return
-        
-        print(f"🔍 Found {len(results)} relevant chunks:")
-        
-        # Calculate summary statistics
+        print(f"[display_results] Found {len(results)} relevant chunks.")
         total_chars = sum(len(result.get("chunk", "")) for result in results)
         sources = set()
         methods = set()
-        
         for result in results:
             sources.add(result.get("metadata", {}).get("source", "Unknown"))
             methods.add(result.get("method", "Unknown"))
-        
-        print(f"📊 Summary:")
+        print(f"[display_results] Summary:")
         print(f"   📚 Total chunks: {len(results)}")
         print(f"   📝 Total characters: {total_chars:,}")
         if show_method:
             print(f"   🔍 Search methods: {', '.join(methods)}")
         print(f"   📖 Sources: {', '.join(sources)}")
-        
-        # Show top 3 results as examples
-        print(f"📄 Top 3 results (showing examples):")
+        print(f"[display_results] Top 3 results (showing examples):")
         for i, result in enumerate(results[:3], 1):
             chunk = result.get("chunk", "")
             metadata = result.get("metadata", {})
             similarity = result.get("similarity", 0)
-            
-            # Get title or first part of chunk
             title = metadata.get("title", chunk[:60])
             if len(title) > 60:
                 title = title[:57] + "..."
-            
             print(f"   {i}. {title} (similarity: {similarity:.3f})")
-        
         if len(results) > 3:
             print(f"   ... and {len(results) - 3} more chunks")
     
     def display_statistics(self):
         """Display comprehensive statistics about the knowledge base."""
-        print(f"\n📊 Knowledge Base Statistics:")
+        print(f"[display_statistics] Knowledge Base Statistics:")
         print("=" * 50)
-        
         if self.embeddings_data:
             total_chunks = len(self.embeddings_data["chunks"])
             total_embeddings = len(self.embeddings_data["embeddings"])
-            
-            print(f"📈 Total chunks: {total_chunks}")
-            print(f"📈 Total embeddings: {total_embeddings}")
+            print(f"   📈 Total chunks: {total_chunks}")
+            print(f"   📈 Total embeddings: {total_embeddings}")
             if total_embeddings > 0:
-                print(f"📈 Embedding dimensions: {len(self.embeddings_data['embeddings'][0])}")
-            
-            print(f"\n📊 Source Breakdown:")
+                print(f"   📈 Embedding dimensions: {len(self.embeddings_data['embeddings'][0])}")
+            print(f"[display_statistics] Source Breakdown:")
             for source, stats in self.embeddings_data["sources"].items():
                 print(f"   {source}: {stats['chunks']} chunks")
                 if "stats" in stats and stats["stats"]:
                     source_stats = stats["stats"]
                     print(f"     - Papers: {source_stats.get('total_papers', 'N/A')}")
                     print(f"     - Embeddings: {source_stats.get('total_embeddings', 'N/A')}")
-        
         if self.use_chromadb and self.chroma_manager:
-            print(f"\n🗄️ ChromaDB Statistics:")
+            print(f"[display_statistics] ChromaDB Statistics:")
             chroma_stats = self.chroma_manager.get_collection_stats()
             print(f"   Total documents: {chroma_stats.get('total_documents', 0)}")
             print(f"   Collection name: {chroma_stats.get('collection_name', 'N/A')}")
@@ -616,49 +603,44 @@ class EnhancedRAGQuery:
         return [all_docs[i] for i in top_indices]
 
     @staticmethod
-    def automated_verdict(accuracy, novelty, accuracy_threshold=85, novelty_threshold=90):
-        if accuracy is not None and novelty is not None:
-            return "ACCEPTED" if accuracy >= accuracy_threshold and novelty >= novelty_threshold else "REJECTED"
+    def automated_verdict(accuracy, novelty, relevancy, accuracy_threshold=80, novelty_threshold=85, relevancy_threshold=90):
+        if accuracy is not None and novelty is not None and relevancy is not None:
+            return "ACCEPTED" if (accuracy >= accuracy_threshold and novelty >= novelty_threshold and relevancy >= relevancy_threshold) else "REJECTED"
         return "REJECTED"
 
     def iterative_hypothesis_generation(self, user_prompt, max_rounds=5, n=3):
         """Run generator-critic feedback loop for each hypothesis until accepted (>=90% accuracy/novelty and verdict ACCEPT)."""
-        
+        novelty_threshold = 85
+        accuracy_threshold = 80
+        relevancy_threshold = 50
         if not self.hypothesis_generator or not self.hypothesis_critic:
-            print("❌ Hypothesis tools not initialized. Check if Gemini API key is available.")
+            print("[iterative_hypothesis_generation] ERROR: Hypothesis tools not initialized. Check if Gemini API key is available.")
             return
-        
         # Use stored context chunks if available, otherwise search for new ones
         if hasattr(self, 'last_context_chunks') and self.last_context_chunks:
             context_chunks = self.last_context_chunks
-            print(f"\n🧠 Using {len(context_chunks)} previously found context chunks for hypothesis generation...")
+            print(f"[iterative_hypothesis_generation] Using {len(context_chunks)} previously found context chunks for hypothesis generation.")
         else:
-            print(f"\n🔍 Searching all loaded batches for relevant context...")
+            print(f"[iterative_hypothesis_generation] Searching all loaded batches for relevant context...")
             context_chunks = self.retrieve_relevant_chunks(user_prompt, top_k=20)
             if not context_chunks:
-                print("❌ No relevant context found.")
+                print("[iterative_hypothesis_generation] ERROR: No relevant context found.")
                 return
             self.last_context_chunks = context_chunks
-        
-        print(f"\n🧠 Generating initial hypotheses...")
+        print(f"[iterative_hypothesis_generation] Generating initial hypotheses...")
         try:
-            # Extract chunk text from context_chunks
             context_texts = [chunk.get("document", "") if isinstance(chunk, dict) else chunk for chunk in context_chunks]
             hypotheses = self.hypothesis_generator.generate(context_texts, n=n)
         except Exception as e:
-            print(f"❌ Failed to generate initial hypotheses: {e}")
+            print(f"[iterative_hypothesis_generation] ERROR: Failed to generate initial hypotheses: {e}")
             return
-        
         accepted = [False] * n
         rounds = [0] * n
         critiques = [{} for _ in range(n)]
-        
-        # Add progress tracking for the iterative process
         from tqdm.auto import tqdm
         total_iterations = max_rounds * n
         current_iteration = 0
-        
-        print(f"\n🔄 Starting iterative refinement (max {max_rounds} rounds per hypothesis, 5-minute time limit per critique)...")
+        print(f"[iterative_hypothesis_generation] Starting iterative refinement (max {max_rounds} rounds per hypothesis, 5-minute time limit per critique, acceptance: Novelty >= {novelty_threshold}, Accuracy >= {accuracy_threshold}, Relevancy >= {relevancy_threshold})...")
         with tqdm(total=total_iterations, desc="Hypothesis refinement", unit="iteration") as pbar:
             while not all(accepted) and max(rounds) < max_rounds:
                 for i in range(n):
@@ -666,25 +648,14 @@ class EnhancedRAGQuery:
                         continue
                     rounds[i] += 1
                     current_iteration += 1
-                    
-                    print(f"\n🔄 Critique Round {rounds[i]} for Hypothesis {i+1}:")
-                    
-                    # Start timer for this hypothesis critique
+                    print(f"[iterative_hypothesis_generation] Critique Round {rounds[i]} for Hypothesis {i+1} (5-minute timer started)...")
                     self.hypothesis_timer.start()
-                    print(f"⏱️  Starting 5-minute timer for hypothesis {i+1}...")
-                    
                     try:
-                        # Extract chunk text from context_chunks
                         context_texts = [chunk.get("document", "") if isinstance(chunk, dict) else chunk for chunk in context_chunks]
-                        
-                        # Check timer before starting critique
                         if self.hypothesis_timer.check_expired():
-                            print(f"⏰ Time limit reached for hypothesis {i+1}. Moving to next hypothesis.")
-                            # Extract citations for this hypothesis
+                            print(f"[iterative_hypothesis_generation] TIMEOUT: Hypothesis {i+1} critique timed out.")
                             citations = self.extract_citations_from_chunks(context_chunks)
                             formatted_citations = self.format_citations_for_export(citations)
-                            
-                            # Record incomplete result
                             self.hypothesis_records.append({
                                 'Hypothesis': hypotheses[i],
                                 'Accuracy': None,
@@ -695,17 +666,11 @@ class EnhancedRAGQuery:
                             })
                             pbar.update(1)
                             continue
-                        
-                        critique_result = self.hypothesis_critic.critique(hypotheses[i], context_texts)
-                        
-                        # Check timer after critique
+                        critique_result = self.hypothesis_critic.critique(hypotheses[i], context_texts, prompt=user_prompt)
                         if self.hypothesis_timer.check_expired():
-                            print(f"⏰ Time limit reached for hypothesis {i+1} after critique. Moving to next hypothesis.")
-                            # Extract citations for this hypothesis
+                            print(f"[iterative_hypothesis_generation] TIMEOUT: Hypothesis {i+1} critique timed out after critique.")
                             citations = self.extract_citations_from_chunks(context_chunks)
                             formatted_citations = self.format_citations_for_export(citations)
-                            
-                            # Record incomplete result
                             self.hypothesis_records.append({
                                 'Hypothesis': hypotheses[i],
                                 'Accuracy': critique_result.get('accuracy', None),
@@ -716,59 +681,44 @@ class EnhancedRAGQuery:
                             })
                             pbar.update(1)
                             continue
-                        
                         critiques[i] = critique_result
-                        print(f"Hypothesis {i+1}: {hypotheses[i]}")
-                        print(f"Critique: {critique_result['critique']}")
                         novelty = critique_result.get('novelty', 0)
                         accuracy = critique_result.get('accuracy', 0)
-                        verdict = self.automated_verdict(accuracy, novelty)
+                        relevancy = critique_result.get('relevancy', 0)
+                        verdict = self.automated_verdict(accuracy, novelty, relevancy)
                         remaining_time = self.hypothesis_timer.get_remaining_time()
-                        print(f"Novelty Score: {novelty}, Accuracy Score: {accuracy}, Automated Verdict: {verdict}")
-                        print(f"⏱️  Time remaining: {remaining_time:.1f}s")
-                        
-                        # Extract citations for this hypothesis
+                        print(f"\033[1mHypothesis {i+1}:\033[0m \033[96m{hypotheses[i]}\033[0m")
+                        print(f"[iterative_hypothesis_generation] Critique: {critique_result['critique']}")
+                        print(f"[iterative_hypothesis_generation] Scores: Novelty={novelty}, Accuracy={accuracy}, Relevancy={relevancy}, Automated Verdict={verdict}, Time left={remaining_time:.1f}s")
                         citations = self.extract_citations_from_chunks(context_chunks)
                         formatted_citations = self.format_citations_for_export(citations)
-                        
-                        # Track record for export
                         self.hypothesis_records.append({
                             'Hypothesis': hypotheses[i],
                             'Accuracy': accuracy,
                             'Novelty': novelty,
+                            'Relevancy': relevancy,
                             'Verdict': verdict,
                             'Critique': critique_result.get('critique', ''),
                             'Citations': formatted_citations
                         })
-                        
                         if verdict == 'ACCEPTED':
-                            print(f"✅ Hypothesis {i+1} accepted (accuracy: {accuracy}, novelty: {novelty}, automated verdict: {verdict})")
+                            print(f"\033[92mACCEPTED\033[0m: Hypothesis {i+1} (Novelty: {novelty} >= {novelty_threshold}, Accuracy: {accuracy} >= {accuracy_threshold}, Relevancy: {relevancy} >= {relevancy_threshold})")
                             accepted[i] = True
                         else:
-                            print(f"❌ Hypothesis {i+1} rejected (accuracy: {accuracy}, novelty: {novelty}, automated verdict: {verdict}) - Regenerating...")
-                            
-                            # Check timer before regeneration
+                            print(f"\033[91mREJECTED\033[0m: Hypothesis {i+1} (Novelty: {novelty} < {novelty_threshold} or Accuracy: {accuracy} < {accuracy_threshold} or Relevancy: {relevancy} < {relevancy_threshold}) - Regenerating...")
                             if self.hypothesis_timer.check_expired():
-                                print(f"⏰ Time limit reached for hypothesis {i+1} regeneration. Moving to next hypothesis.")
+                                print(f"[iterative_hypothesis_generation] TIMEOUT: Hypothesis {i+1} regeneration timed out.")
                                 pbar.update(1)
                                 continue
-                            
                             try:
-                                # Extract chunk text from context_chunks
                                 context_texts = [chunk.get("document", "") if isinstance(chunk, dict) else chunk for chunk in context_chunks]
                                 new_hypothesis = self.hypothesis_generator.generate(context_texts, n=1)
                                 if new_hypothesis:
                                     hypotheses[i] = new_hypothesis[0]
                             except Exception as e:
-                                print(f"❌ Failed to regenerate hypothesis {i+1}: {e}")
+                                print(f"[iterative_hypothesis_generation] ERROR: Failed to regenerate hypothesis {i+1}: {e}")
                                 continue
-                        
-                        # Calculate average rating for progress tracking
-                        novelty = critique_result.get('novelty', 0)
-                        accuracy = critique_result.get('accuracy', 0)
-                        avg_rating = (novelty + accuracy) / 2 if novelty is not None and accuracy is not None else 0
-                        
-                        # Update progress bar with average rating
+                        avg_rating = (novelty + accuracy + relevancy) / 3 if novelty is not None and accuracy is not None and relevancy is not None else 0
                         pbar.set_postfix({
                             "accepted": sum(accepted),
                             "round": max(rounds),
@@ -777,68 +727,53 @@ class EnhancedRAGQuery:
                             "time_left": f"{remaining_time:.0f}s"
                         })
                         pbar.update(1)
-                        
                     except Exception as e:
-                        print(f"❌ Failed to critique hypothesis {i+1}: {e}")
-                        # Extract citations for this hypothesis
+                        print(f"[iterative_hypothesis_generation] ERROR: Failed to critique hypothesis {i+1}: {e}")
                         citations = self.extract_citations_from_chunks(context_chunks)
                         formatted_citations = self.format_citations_for_export(citations)
-                        
-                        # Record error result
                         self.hypothesis_records.append({
                             'Hypothesis': hypotheses[i],
                             'Accuracy': None,
                             'Novelty': None,
+                            'Relevancy': None,
                             'Verdict': 'ERROR',
                             'Critique': f'Error during critique: {str(e)}',
                             'Citations': formatted_citations
                         })
                         pbar.update(1)
                         continue
-                    
-                    # Break if all hypotheses are accepted
                     if all(accepted):
                         break
-        
-        print("\nFinal Hypotheses:")
+        print("[iterative_hypothesis_generation] Final Hypotheses:")
         for i, hyp in enumerate(hypotheses, 1):
-            status = "ACCEPTED" if accepted[i-1] else "FAILED (max rounds)"
-            print(f"{i}. {hyp} [{status}]")
+            status = "ACCEPTED" if accepted[i-1] else f"FAILED (max {max_rounds} rounds)"
+            print(f"   {i}. {hyp} [{status}]")
             if isinstance(critiques[i-1], dict) and critiques[i-1]:
-                print(f"   Critique: {critiques[i-1].get('critique','')}")
-                print(f"   Novelty: {critiques[i-1].get('novelty','')}, Accuracy: {critiques[i-1].get('accuracy','')}, Automated Verdict: {self.automated_verdict(critiques[i-1].get('accuracy',0), critiques[i-1].get('novelty',0))}")
+                print(f"      Critique: {critiques[i-1].get('critique','')}")
+                print(f"      Novelty: {critiques[i-1].get('novelty','')}, Accuracy: {critiques[i-1].get('accuracy','')}, Relevancy: {critiques[i-1].get('relevancy','')}, Automated Verdict: {self.automated_verdict(critiques[i-1].get('accuracy',0), critiques[i-1].get('novelty',0), critiques[i-1].get('relevancy',0))} ({self.automated_verdict(critiques[i-1].get('accuracy',0), critiques[i-1].get('novelty',0), critiques[i-1].get('relevancy',0), accuracy_threshold=accuracy_threshold, novelty_threshold=novelty_threshold, relevancy_threshold=relevancy_threshold)})")
         return hypotheses
 
     def add_to_package(self, search_results):
         """Add search results to the current package."""
-        # Check if adding these results would make the package too large
         current_size = self.current_package["total_chars"]
         new_size = current_size + sum(len(result.get("chunk", "")) for result in search_results)
-        
-        # Warn if package would become very large (>2MB)
         if new_size > 2000000:
-            print(f"⚠️  Adding {len(search_results)} chunks would make package very large ({new_size:,} characters)")
-            print("💡 This may cause API errors. Consider using 'clear' first.")
+            print(f"[add_to_package] WARNING: Adding {len(search_results)} chunks would make package very large ({new_size:,} characters)")
+            print("[add_to_package] This may cause API errors. Consider using 'clear' first.")
             response = input("Continue anyway? (y/n): ").lower()
             if response != 'y':
                 return
-        
         for result in search_results:
             chunk = result.get("chunk", "")
             metadata = result.get("metadata", {})
-            
-            # Add to package
             self.current_package["chunks"].append(chunk)
             self.current_package["metadata"].append(metadata)
             self.current_package["sources"].add(metadata.get("source", "Unknown"))
             self.current_package["total_chars"] += len(chunk)
-        
-        print(f"📦 Added {len(search_results)} chunks to package")
-        print(f"📦 Package now contains {len(self.current_package['chunks'])} chunks from {len(self.current_package['sources'])} sources")
-        
-        # Show size warning if package is getting large
+        print(f"[add_to_package] Added {len(search_results)} chunks to package.")
+        print(f"[add_to_package] Package now contains {len(self.current_package['chunks'])} chunks from {len(self.current_package['sources'])} sources.")
         if self.current_package["total_chars"] > 1000000:
-            print(f"⚠️  Package size: {self.current_package['total_chars']:,} characters (consider using 'clear' if you get API errors)")
+            print(f"[add_to_package] WARNING: Package size: {self.current_package['total_chars']:,} characters (consider using 'clear' if you get API errors)")
 
     def clear_package(self):
         """Clear the current package."""
@@ -848,21 +783,18 @@ class EnhancedRAGQuery:
             "sources": set(),
             "total_chars": 0
         }
-        print("🗑️ Package cleared")
+        print("[clear_package] Package cleared.")
 
     def show_package(self):
         """Display information about the current package."""
         if not self.current_package["chunks"]:
-            print("📦 Package is empty")
+            print("[show_package] Package is empty.")
             return
-        
-        print(f"📦 Current Package:")
+        print(f"[show_package] Current Package:")
         print(f"   📚 Total chunks: {len(self.current_package['chunks'])}")
         print(f"   📝 Total characters: {self.current_package['total_chars']:,}")
         print(f"   📖 Sources: {', '.join(self.current_package['sources'])}")
-        
-        # Show top 3 chunks as examples
-        print(f"\n📄 Sample chunks:")
+        print(f"\n[show_package] Sample chunks:")
         for i, chunk in enumerate(self.current_package["chunks"][:3], 1):
             metadata = self.current_package["metadata"][i-1]
             title = metadata.get("title", "No title")[:60]
@@ -871,17 +803,22 @@ class EnhancedRAGQuery:
             print(f"   ... and {len(self.current_package['chunks']) - 3} more chunks")
 
     def generate_hypotheses_from_package(self, n=5):
-        """Generate hypotheses using the package for critique and entire database for generation."""
+        novelty_threshold = 85
+        accuracy_threshold = 80
+        relevancy_threshold = 50
         if not self.current_package["chunks"]:
             print("❌ Package is empty. Add some chunks first.")
             return
-        
         if not self.hypothesis_generator or not self.hypothesis_critic:
             print("❌ Hypothesis tools not initialized. Check if Gemini API key is available.")
             return
-        
+        # Prompt for the query if not already stored
+        if "prompt" not in self.current_package or not self.current_package["prompt"]:
+            self.current_package["prompt"] = input("Enter the original query for this package: ").strip()
+        package_prompt = self.current_package["prompt"]
         print(f"\n🧠 Generating {n} hypotheses...")
         print(f"📦 Using {len(self.current_package['chunks'])} package chunks for critique")
+        print(f"[INFO] Acceptance criteria: Novelty >= {novelty_threshold}, Accuracy >= {accuracy_threshold}, Relevancy >= {relevancy_threshold}")
         
         # Check package size and warn if too large
         package_size = sum(len(chunk) for chunk in self.current_package["chunks"])
@@ -921,7 +858,7 @@ class EnhancedRAGQuery:
         print(f"📦 Package contains {len(package_chunks)} chunks")
         
         # Sequential, real-time generator-critic loop for 5 accepted hypotheses
-        print(f"\n🧠 Generating hypotheses one at a time until 5 are accepted (novelty and accuracy >= 95, 5-minute time limit per critique)...")
+        print(f"\n🧠 Generating hypotheses one at a time until 5 are accepted (novelty >= {novelty_threshold}, accuracy >= {accuracy_threshold}, 5-minute time limit per critique)...")
         accepted_hypotheses = []
         attempts = 0
         max_attempts = 100  # Prevent infinite loops
@@ -965,7 +902,7 @@ class EnhancedRAGQuery:
                 })
                 continue
             
-            critique_result = self._critique_hypothesis_with_retry(hypothesis, package_chunks)
+            critique_result = self._critique_hypothesis_with_retry(hypothesis, package_chunks, package_prompt)
             if not critique_result:
                 print(f"❌ Failed to critique hypothesis after retries. Skipping...")
                 # Record failed critique
@@ -995,9 +932,10 @@ class EnhancedRAGQuery:
             
             novelty = critique_result.get('novelty', 0)
             accuracy = critique_result.get('accuracy', 0)
-            verdict = self.automated_verdict(accuracy, novelty)
+            relevancy = critique_result.get('relevancy', 0)
+            verdict = self.automated_verdict(accuracy, novelty, relevancy)
             remaining_time = self.hypothesis_timer.get_remaining_time()
-            print(f"   Novelty: {novelty}, Accuracy: {accuracy}, Automated Verdict: {verdict}")
+            print(f"   Novelty: {novelty}, Accuracy: {accuracy}, Relevancy: {relevancy}, Automated Verdict: {verdict}")
             print(f"   ⏱️  Time remaining: {remaining_time:.1f}s")
             
             # Extract citations from package metadata
@@ -1034,20 +972,21 @@ class EnhancedRAGQuery:
                 'Hypothesis': hypothesis,
                 'Accuracy': accuracy,
                 'Novelty': novelty,
+                'Relevancy': relevancy,
                 'Verdict': verdict,
                 'Critique': critique_result.get('critique', ''),
                 'Citations': formatted_citations
             })
             
-            if novelty is not None and accuracy is not None and novelty >= 95 and accuracy >= 90:
+            if novelty is not None and accuracy is not None and novelty >= novelty_threshold and accuracy >= accuracy_threshold and relevancy >= relevancy_threshold:
                 accepted_hypotheses.append({
                     "hypothesis": hypothesis,
                     "critique": critique_result,
-                    "score": (novelty + accuracy) / 2
+                    "score": (novelty + accuracy + relevancy) / 3
                 })
-                print(f"✅ Hypothesis accepted! ({len(accepted_hypotheses)}/5)-----------------------------------\n")
+                print(f"✅ Hypothesis accepted! ({len(accepted_hypotheses)}/{n})-----------------------------------\n")
             else:
-                print(f"❌ Hypothesis rejected (novelty or accuracy below threshold)-----------------------------------\n")
+                print(f"❌ Hypothesis rejected (novelty or accuracy below threshold: Novelty < {novelty_threshold} or Accuracy < {accuracy_threshold} or Relevancy < {relevancy_threshold})-----------------------------------\n")
         
         if not accepted_hypotheses:
             print("❌ No hypotheses were successfully critiqued.")
@@ -1063,7 +1002,8 @@ class EnhancedRAGQuery:
             print(f"   Score: {score:.1f}")
             print(f"   Novelty: {critique.get('novelty', 'N/A')}")
             print(f"   Accuracy: {critique.get('accuracy', 'N/A')}")
-            print(f"   Automated Verdict: {self.automated_verdict(critique.get('accuracy', 0), critique.get('novelty', 0))}")
+            print(f"   Relevancy: {critique.get('relevancy', 'N/A')}")
+            print(f"   Automated Verdict: {self.automated_verdict(critique.get('accuracy', 0), critique.get('novelty', 0), critique.get('relevancy', 0))} ({self.automated_verdict(critique.get('accuracy', 0), critique.get('novelty', 0), critique.get('relevancy', 0), accuracy_threshold=accuracy_threshold, novelty_threshold=novelty_threshold, relevancy_threshold=relevancy_threshold)})")
             print(f"   Critique: {critique.get('critique', 'N/A')}")
             print("-" * 80)
         return accepted_hypotheses[:n]
@@ -1103,7 +1043,7 @@ class EnhancedRAGQuery:
                     return None
         return None
 
-    def _critique_hypothesis_with_retry(self, hypothesis, package_chunks, max_retries=3):
+    def _critique_hypothesis_with_retry(self, hypothesis, package_chunks, prompt, max_retries=3):
         """Critique hypothesis with retry logic for rate limiting."""
         if not self.hypothesis_critic:
             print("❌ Hypothesis critic not available")
@@ -1119,7 +1059,7 @@ class EnhancedRAGQuery:
                 
                 # Extract chunk text from package chunks
                 package_chunk_texts = [chunk for chunk in package_chunks]
-                critique_result = self.hypothesis_critic.critique(hypothesis, package_chunk_texts)
+                critique_result = self.hypothesis_critic.critique(hypothesis, package_chunk_texts, prompt=prompt)
                 return critique_result
             except Exception as e:
                 error_str = str(e)
@@ -1245,36 +1185,28 @@ class EnhancedRAGQuery:
         """Initialize the HypothesisGenerator and HypothesisCritic."""
         if self.gemini_client:
             self.hypothesis_generator = HypothesisGenerator(model=self.gemini_client)
-            self.hypothesis_critic = HypothesisCritic(model=self.gemini_client)
+            def embedding_fn(text):
+                return np.array(self.get_google_embedding(text))
+            self.hypothesis_critic = HypothesisCritic(model=self.gemini_client, embedding_fn=embedding_fn)
             print("✅ Hypothesis tools initialized successfully.")
         else:
             print("⚠️ Gemini client not initialized, skipping hypothesis tools.")
 
     def export_hypotheses_to_excel(self, filename=None):
-        """Export all hypothesis records to Excel format."""
+        """Export all hypothesis records to Excel format, including all iterations."""
         if not self.hypothesis_records:
             print("❌ No hypothesis records to export.")
             return None
-        
         try:
-            # Create filename with timestamp if not provided
             if filename is None:
                 from datetime import datetime
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 filename = f"hypothesis_export_{timestamp}.xlsx"
-            
-            # Create DataFrame from hypothesis records
+            import pandas as pd
             df = pd.DataFrame(self.hypothesis_records)
-            
-            # Reorder columns for better readability
-            column_order = ['Hypothesis', 'Accuracy', 'Novelty', 'Verdict', 'Critique', 'Citations']
-            df = df[column_order]
-            
-            # Export to Excel
+            # Auto-detect columns
             with pd.ExcelWriter(filename, engine='openpyxl') as writer:
                 df.to_excel(writer, sheet_name='Hypotheses', index=False)
-                
-                # Auto-adjust column widths
                 worksheet = writer.sheets['Hypotheses']
                 for column in worksheet.columns:
                     max_length = 0
@@ -1285,43 +1217,14 @@ class EnhancedRAGQuery:
                                 max_length = len(str(cell.value))
                         except:
                             pass
-                    adjusted_width = min(max_length + 2, 50)  # Cap at 50 characters
+                    adjusted_width = min(max_length + 2, 50)
                     worksheet.column_dimensions[column_letter].width = adjusted_width
-            
             print(f"✅ Successfully exported {len(self.hypothesis_records)} hypothesis records to: {filename}")
-            
-            # Display summary statistics
-            self._display_export_summary(df)
-            
             return filename
-            
         except Exception as e:
             print(f"❌ Failed to export hypotheses to Excel: {e}")
             return None
-    
-    def _display_export_summary(self, df):
-        """Display summary statistics of exported hypotheses."""
-        print(f"\n📊 Export Summary:")
-        print(f"   Total hypotheses: {len(df)}")
-        
-        # Count by verdict
-        verdict_counts = df['Verdict'].value_counts()
-        print(f"   Verdict breakdown:")
-        for verdict, count in verdict_counts.items():
-            print(f"     {verdict}: {count}")
-        
-        # Calculate average scores for completed hypotheses
-        completed_df = df[df['Accuracy'].notna() & df['Novelty'].notna()]
-        if len(completed_df) > 0:
-            avg_accuracy = completed_df['Accuracy'].mean()
-            avg_novelty = completed_df['Novelty'].mean()
-            print(f"   Average accuracy: {avg_accuracy:.1f}")
-            print(f"   Average novelty: {avg_novelty:.1f}")
-        
-        # Count hypotheses with citations
-        citations_df = df[df['Citations'] != 'No citations available']
-        print(f"   Hypotheses with citations: {len(citations_df)}")
-    
+
     def clear_hypothesis_records(self):
         """Clear all stored hypothesis records."""
         self.hypothesis_records = []
@@ -1338,7 +1241,7 @@ class EnhancedRAGQuery:
         
         for i, record in enumerate(self.hypothesis_records, 1):
             print(f"\n{i}. Hypothesis: {record['Hypothesis'][:100]}{'...' if len(record['Hypothesis']) > 100 else ''}")
-            print(f"   Accuracy: {record['Accuracy']}, Novelty: {record['Novelty']}, Verdict: {record['Verdict']}")
+            print(f"   Accuracy: {record['Accuracy']}, Novelty: {record['Novelty']}, Relevancy: {record['Relevancy']}, Verdict: {record['Verdict']}")
             print(f"   Citations: {len(record['Citations'].split(';')) if record['Citations'] != 'No citations available' else 0} sources")
             print("-" * 80)
 
@@ -1356,7 +1259,9 @@ class EnhancedRAGQuery:
         print()
 
     def interactive_search(self):
-        """Interactive search interface with only add and clear commands. 'add' does the full workflow."""
+        novelty_threshold = 85
+        accuracy_threshold = 80
+        relevancy_threshold = 50
         print("=== Enhanced RAG Query System ===")
         print("🔍 Search across all your knowledge bases!")
         self._display_commands()
@@ -1452,7 +1357,7 @@ class EnhancedRAGQuery:
                         batch_size = 500
                         all_chunks = [r['chunk'] for r in results]
                         # Sequential, real-time generator-critic loop for 5 accepted hypotheses
-                        print(f"\n🧠 Generating hypotheses one at a time until 5 are accepted (novelty and accuracy >= 95, 5-minute time limit per critique)...")
+                        print(f"\n🧠 Generating hypotheses one at a time until 5 are accepted (novelty >= {novelty_threshold}, accuracy >= {accuracy_threshold}, 5-minute time limit per critique)...")
                         accepted_hypotheses = []
                         attempts = 0
                         max_attempts = 100  # Prevent infinite loops
@@ -1496,7 +1401,7 @@ class EnhancedRAGQuery:
                                 })
                                 continue
                             
-                            critique_result = self._critique_hypothesis_with_retry(hypothesis, all_chunks)
+                            critique_result = self._critique_hypothesis_with_retry(hypothesis, all_chunks, search_query)
                             if not critique_result:
                                 print(f"❌ Failed to critique hypothesis after retries. Skipping...")
                                 # Record failed critique
@@ -1526,9 +1431,10 @@ class EnhancedRAGQuery:
                             
                             novelty = critique_result.get('novelty', 0)
                             accuracy = critique_result.get('accuracy', 0)
-                            verdict = self.automated_verdict(accuracy, novelty)
+                            relevancy = critique_result.get('relevancy', 0)
+                            verdict = self.automated_verdict(accuracy, novelty, relevancy)
                             remaining_time = self.hypothesis_timer.get_remaining_time()
-                            print(f"   Novelty: {novelty}, Accuracy: {accuracy}, Automated Verdict: {verdict}")
+                            print(f"   Novelty: {novelty}, Accuracy: {accuracy}, Relevancy: {relevancy}, Automated Verdict: {verdict}")
                             print(f"   ⏱️  Time remaining: {remaining_time:.1f}s")
                             
                             # Extract citations from results metadata
@@ -1566,20 +1472,21 @@ class EnhancedRAGQuery:
                                 'Hypothesis': hypothesis,
                                 'Accuracy': accuracy,
                                 'Novelty': novelty,
+                                'Relevancy': relevancy,
                                 'Verdict': verdict,
                                 'Critique': critique_result.get('critique', ''),
                                 'Citations': formatted_citations
                             })
                             
-                            if novelty is not None and accuracy is not None and novelty >= 95 and accuracy >= 90:
+                            if novelty is not None and accuracy is not None and novelty >= novelty_threshold and accuracy >= accuracy_threshold and relevancy >= relevancy_threshold:
                                 accepted_hypotheses.append({
                                     "hypothesis": hypothesis,
                                     "critique": critique_result,
-                                    "score": (novelty + accuracy) / 2
+                                    "score": (novelty + accuracy + relevancy) / 3
                                 })
                                 print(f"✅ Hypothesis accepted! ({len(accepted_hypotheses)}/5)")
                             else:
-                                print(f"❌ Hypothesis rejected (novelty or accuracy below 95)")
+                                print(f"❌ Hypothesis rejected (novelty or accuracy below threshold: Novelty < {novelty_threshold} or Accuracy < {accuracy_threshold} or Relevancy < {relevancy_threshold})")
                         
                         if not accepted_hypotheses:
                             print("❌ No hypotheses were successfully critiqued.")
@@ -1595,7 +1502,8 @@ class EnhancedRAGQuery:
                             print(f"   Score: {score:.1f}")
                             print(f"   Novelty: {critique.get('novelty', 'N/A')}")
                             print(f"   Accuracy: {critique.get('accuracy', 'N/A')}")
-                            print(f"   Automated Verdict: {self.automated_verdict(critique.get('accuracy', 0), critique.get('novelty', 0))}")
+                            print(f"   Relevancy: {critique.get('relevancy', 'N/A')}")
+                            print(f"   Automated Verdict: {self.automated_verdict(critique.get('accuracy', 0), critique.get('novelty', 0), critique.get('relevancy', 0))} ({self.automated_verdict(critique.get('accuracy', 0), critique.get('novelty', 0), critique.get('relevancy', 0), accuracy_threshold=accuracy_threshold, novelty_threshold=novelty_threshold, relevancy_threshold=relevancy_threshold)})")
                             print(f"   Critique: {critique.get('critique', 'N/A')}")
                             print("-" * 80)
                         
@@ -1731,7 +1639,7 @@ class EnhancedRAGQuery:
                 
                 # Critique hypothesis
                 print(f"🔍 Critiquing hypothesis...")
-                critique_result = self.hypothesis_critic.critique(hypothesis, context_texts)
+                critique_result = self.hypothesis_critic.critique(hypothesis, context_texts, prompt=query, lab_goals=LAB_GOALS)
                 
                 # Check timer after critique
                 if self.hypothesis_timer.check_expired():
@@ -1749,10 +1657,11 @@ class EnhancedRAGQuery:
                 # Extract scores and determine verdict
                 novelty = critique_result.get('novelty', 0)
                 accuracy = critique_result.get('accuracy', 0)
-                verdict = self.automated_verdict(accuracy, novelty)
+                relevancy = critique_result.get('relevancy', 0)
+                verdict = self.automated_verdict(accuracy, novelty, relevancy)
                 remaining_time = self.hypothesis_timer.get_remaining_time()
                 
-                print(f"📊 Scores: Accuracy={accuracy}, Novelty={novelty}")
+                print(f"📊 Scores: Accuracy={accuracy}, Novelty={novelty}, Relevancy={relevancy}")
                 print(f"⚖️  Automated Verdict: {verdict}")
                 print(f"⏱️  Time remaining: {remaining_time:.1f}s")
                 
@@ -1768,6 +1677,7 @@ class EnhancedRAGQuery:
                     'Hypothesis': hypothesis,
                     'Accuracy': accuracy,
                     'Novelty': novelty,
+                    'Relevancy': relevancy,
                     'Verdict': verdict,
                     'Critique': critique_result.get('critique', ''),
                     'Citations': formatted_citations
@@ -1778,7 +1688,7 @@ class EnhancedRAGQuery:
                     accepted_hypotheses.append({
                         "hypothesis": hypothesis,
                         "critique": critique_result,
-                        "score": (novelty + accuracy) / 2
+                        "score": (novelty + accuracy + relevancy) / 3
                     })
                     print(f"✅ ACCEPTED! ({len(accepted_hypotheses)}/{max_hypotheses})")
                 else:
@@ -1814,6 +1724,98 @@ class EnhancedRAGQuery:
             print(f"❌ Export failed")
         
         return accepted_hypotheses
+
+    def generate_hypotheses_with_per_hypothesis_timer(self, n=5, max_rounds=10, filename=None):
+        """
+        Generate n hypotheses, using a 5-minute timer for the entire process of generating and refining each hypothesis.
+        After each iteration, print the result, time left, scores, and hypothesis text.
+        Save every iteration in self.hypothesis_records and append to Excel after each iteration.
+        Adds empty verifier columns separated by an empty column.
+        """
+        import pandas as pd
+        from openpyxl import load_workbook
+        from datetime import datetime
+        if not self.current_package["chunks"]:
+            print("❌ Package is empty. Add some chunks first.")
+            return
+        if not self.hypothesis_generator or not self.hypothesis_critic:
+            print("❌ Hypothesis tools not initialized. Check if Gemini API key is available.")
+            return
+        novelty_threshold = 85
+        accuracy_threshold = 80
+        relevancy_threshold = 50
+        print(f"\n🧠 Generating {n} hypotheses (5-minute timer per hypothesis)...")
+        print(f"📦 Using {len(self.current_package['chunks'])} package chunks for critique")
+        print(f"[INFO] Acceptance criteria: Novelty >= {novelty_threshold}, Accuracy >= {accuracy_threshold}, Relevancy >= {relevancy_threshold}")
+        package_chunks = self.current_package["chunks"]
+        self.hypothesis_records = []  # Clear previous records
+        # Prepare Excel file
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"hypothesis_export_{timestamp}.xlsx"
+        # Write header row at the start, with empty separator and verifier columns
+        columns = [
+            'HypothesisNumber', 'Iteration', 'Status', 'Hypothesis', 'Novelty', 'Accuracy', 'Critique', 'TimeLeft',
+            '',  # Empty separator column
+            'Verifier Novelty Score (0-100)', 'Verifier Accuracy Score (0-100)', 'Verifier Verdict (accept, refuse)'
+        ]
+        pd.DataFrame(columns=columns).to_excel(filename, index=False)
+        for hyp_idx in range(n):
+            print(f"\nGenerating hypothesis {hyp_idx+1}/{n}\n")
+            self.hypothesis_timer.start()
+            time_left = self.hypothesis_timer.get_remaining_time()
+            context_texts = [chunk for chunk in package_chunks]
+            hypothesis = self.hypothesis_generator.generate(context_texts, n=1)[0]
+            accepted = False
+            iteration = 0
+            while not accepted and not self.hypothesis_timer.check_expired() and iteration < max_rounds:
+                iteration += 1
+                critique_result = self.hypothesis_critic.critique(hypothesis, context_texts, prompt=query, lab_goals=LAB_GOALS)
+                novelty = critique_result.get('novelty', 0)
+                accuracy = critique_result.get('accuracy', 0)
+                relevancy = critique_result.get('relevancy', 0)
+                time_left = self.hypothesis_timer.get_remaining_time()
+                status = "ACCEPTED" if self.automated_verdict(accuracy, novelty, relevancy) == "ACCEPTED" else "REJECTED"
+                print(f"Iteration {iteration}: {status} | Novelty: {novelty} | Accuracy: {accuracy} | Relevancy: {relevancy} | Time left: {int(time_left)}s")
+                print(f"Hypothesis: {hypothesis}")
+                # Save this iteration to records
+                record = {
+                    'HypothesisNumber': hyp_idx+1,
+                    'Iteration': iteration,
+                    'Status': status,
+                    'Hypothesis': hypothesis,
+                    'Novelty': novelty,
+                    'Accuracy': accuracy,
+                    'Critique': critique_result.get('critique', ''),
+                    'TimeLeft': int(time_left),
+                    '': '',  # Empty separator column
+                    'Verifier Novelty Score (0-100)': '',
+                    'Verifier Accuracy Score (0-100)': '',
+                    'Verifier Verdict (accept, refuse)': ''
+                }
+                self.hypothesis_records.append(record)
+                # Append to Excel after each iteration
+                df_row = pd.DataFrame([record])
+                with pd.ExcelWriter(filename, engine='openpyxl', mode='a', if_sheet_exists='overlay') as writer:
+                    writer.book = load_workbook(filename)
+                    writer.sheets = {ws.title: ws for ws in writer.book.worksheets}
+                    startrow = writer.book['Hypotheses'].max_row
+                    df_row.to_excel(writer, sheet_name='Hypotheses', index=False, header=False, startrow=startrow)
+                if self.automated_verdict(accuracy, novelty, relevancy) == "ACCEPTED":
+                    print(f"✅ Hypothesis accepted! (Novelty: {novelty} >= {novelty_threshold}, Accuracy: {accuracy} >= {accuracy_threshold}, Relevancy: {relevancy} >= {relevancy_threshold})")
+                    accepted = True
+                    break
+                else:
+                    print(f"❌ Hypothesis rejected (Novelty: {novelty} < {novelty_threshold} or Accuracy: {accuracy} < {accuracy_threshold} or Relevancy: {relevancy} < {relevancy_threshold})")
+                if self.hypothesis_timer.check_expired():
+                    print(f"⏰ Time limit reached for hypothesis {hyp_idx+1}. Moving to next hypothesis.")
+                    break
+                # Regenerate hypothesis for next iteration
+                new_hypothesis = self.hypothesis_generator.generate(context_texts, n=1)
+                if new_hypothesis:
+                    hypothesis = new_hypothesis[0]
+        print(f"\n✅ All iterations and results have been saved to: {filename}")
+        return self.hypothesis_records
 
 def main():
     """Main function to run the enhanced RAG query system."""

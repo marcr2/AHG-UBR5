@@ -19,17 +19,18 @@ def show_menu():
     print("6. List loaded batches")
     print("7. Start Enhanced RAG System (with Hypothesis Generation & Critique)")
     print("8. Exit")
+    print("9. Test Try (UBR-5 demo)")
     print()
 
 def get_user_choice():
     """Get user choice for processing"""
     while True:
         try:
-            choice = input("Enter your choice (1-8): ").strip()
-            if choice in ['1', '2', '3', '4', '5', '6', '7', '8']:
+            choice = input("Enter your choice (1-9): ").strip()
+            if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9']:
                 return choice
             else:
-                print("❌ Please enter a number between 1 and 8.")
+                print("❌ Please enter a number between 1 and 9.")
         except KeyboardInterrupt:
             print("\n👋 Goodbye!")
             sys.exit(0)
@@ -445,8 +446,34 @@ def main():
             print("👋 Exiting. Goodbye!")
             break
         
+        elif choice == '9':
+            print("\n🚀 Running Test Try (UBR-5 demo)...\n")
+            try:
+                from enhanced_rag_with_chromadb import EnhancedRAGQuery
+                rag = EnhancedRAGQuery(use_chromadb=True, load_data_at_startup=True)
+                print("🔍 Searching ChromaDB for 500 results with 'UBR-5'...")
+                results = rag.search_chromadb('UBR-5', top_k=500)
+                if not results:
+                    print("❌ No results found for 'UBR-5'.")
+                else:
+                    print(f"📦 Found {len(results)} relevant chunks. Generating hypotheses...")
+                    # Set up the package for hypothesis generation
+                    rag.current_package = {
+                        "chunks": [r['document'] if isinstance(r, dict) and 'document' in r else r for r in results],
+                        "metadata": [r['metadata'] if isinstance(r, dict) and 'metadata' in r else {} for r in results],
+                        "sources": set(),
+                        "total_chars": sum(len(r['document']) if isinstance(r, dict) and 'document' in r else len(str(r)) for r in results),
+                        "prompt": 'UBR-5'
+                    }
+                    hyps = rag.generate_hypotheses_from_package(n=5)
+                    print("\n🏆 Generated Hypotheses:")
+                    for i, hyp in enumerate(hyps, 1):
+                        print(f"{i}. {hyp}")
+            except Exception as e:
+                print(f"❌ Test Try failed: {e}")
+        
         # Ask if user wants to continue
-        if choice in ['1', '2', '3', '4', '5', '6', '7', '8']:
+        if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9']:
             print(f"\n💡 Next steps:")
             if choice in ['1', '2', '3']:
                 print(f"   - Run option 4 to load data into vector database")
@@ -457,6 +484,8 @@ def main():
                 print(f"   - The Enhanced RAG System includes hypothesis generation and critique")
                 print(f"   - Use 'hypothesis' command to generate scientific hypotheses")
                 print(f"   - Use 'critique' command to evaluate hypotheses")
+            if choice == '9':
+                print(f"   - The Test Try (UBR-5 demo) runs a search and generates hypotheses.")
             print(f"   - Run 'enhanced_rag_with_chromadb.py' directly for advanced features")
             print()
             

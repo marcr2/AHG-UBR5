@@ -1,5 +1,7 @@
 import re
 from typing import List, Optional
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
 
 UBR5_KEYWORDS = [
     r"\bUBR5\b", r"\bUbr5\b", r"ubiquitin.*ligase", r"EDD protein", r"EDD1", r"EDD-1", r"EDD/UBR5"
@@ -27,7 +29,35 @@ class HypothesisGenerator:
     def build_prompt(self, context_chunks: List[str], n: int = 3) -> str:
         context = "\n\n".join(context_chunks)
         prompt = f"""
-You are an expert scientific assistant for Dr. Xiaojing Ma's lab, specializing in UBR-5 (ubiquitin-protein ligase E3 component n-recognin 5) and its role in cancer immunology and protein ubiquitination. Based on the following literature excerpts, generate {n} novel, testable mechanistic or therapeutic hypotheses related to UBR-5. Each hypothesis should be clear, specific, and relevant to Dr. Ma's research interests.
+# AI Research Assistant Prompt
+
+## Role
+You are a molecular biology research specialist with expertise in UBR-5 protein research, working within the context of Dr. Xiaojing Ma's laboratory at Weill Cornell Medicine.
+
+## Primary Responsibilities
+
+### 1. Hypothesis Generation
+Analyze provided information \"batches\" to develop one novel, scientifically sound hypothesis related to UBR-5 protein function, regulation, or therapeutic applications.
+
+### 2. Critical Evaluation
+Assess generated hypotheses using three key criteria:
+- Scientific accuracy and feasibility
+- Novelty and originality in the field
+- Relevance to Dr. Xiaojing Ma's research program and laboratory capabilities
+- Ability for Dr. Xiaojing Ma's lab to execute said experiment, based on your previous reading of Dr. Xiaojing Ma's papers.
+
+### 3. Experimental Design
+Develop detailed research proposal for the hypothesis, including:
+- Specific experimental approaches and methodologies
+- Required resources and timelines
+- Expected outcomes and potential limitations
+
+## Communication Style
+Maintain a highly analytical, critical, and scientifically rigorous approach.
+
+Please limit your output to 1000 characters.
+
+---
 
 Literature Context:
 {context}
@@ -60,15 +90,18 @@ Hypotheses:
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         return lines[:n]
 
+LAB_GOALS = "UBR5, cancer immunology, protein ubiquitination, mechanistic and therapeutic hypotheses, Dr. Xiaojing Ma's lab at Weill Cornell Medicine. The lab focuses on post-transcriptional regulation, ubiquitination, cancer models, and translational control."
+
 class HypothesisCritic:
     """
     Critiques scientific hypotheses in the context of UBR-5 and Dr. Xiaojing Ma's lab using provided literature.
     Uses a Gemini LLM client for critique and parses scores/verdict.
     """
-    def __init__(self, model=None):
+    def __init__(self, model=None, embedding_fn=None):
         self.model = model  # Gemini client
+        self.embedding_fn = embedding_fn  # Function to get embeddings
 
-    def build_prompt(self, hypothesis: str, context_chunks: List[str]) -> str:
+    def build_prompt(self, hypothesis: str, context_chunks: list) -> str:
         context = "\n\n".join(context_chunks)
         prompt = f"""
 You are an expert scientific reviewer for Dr. Xiaojing Ma's lab, specializing in UBR-5 and related pathways. Critically evaluate the following hypothesis in light of the provided literature. Discuss its novelty, plausibility, and potential impact. Point out any supporting or conflicting evidence from the context.
@@ -76,13 +109,13 @@ You are an expert scientific reviewer for Dr. Xiaojing Ma's lab, specializing in
 After your critique, provide:
 - A novelty score (0-100, where 100 is completely novel)
 - An accuracy score (0-100, where 100 is fully supported by the context)
-- A final verdict: ACCEPT or REJECT
+- A relevancy score (0-100, where 100 is maximally relevant to the prompt and lab goals)
 
 Format your answer as:
 Critique: <your critique>
 Novelty Score: <number>
 Accuracy Score: <number>
-Verdict: <ACCEPT/REJECT>
+Relevancy Score: <number>
 
 Literature Context:
 {context}
@@ -92,32 +125,45 @@ Hypothesis:
 """
         return prompt
 
-    def critique(self, hypothesis: str, context_chunks: List[str]) -> dict:
-        prompt = self.build_prompt(hypothesis, context_chunks)
+    def compute_relevancy(self, hypothesis: str, prompt: str, lab_goals: str) -> float:
+        if not self.embedding_fn:
+            return 100.0  # fallback
+        hyp_emb = self.embedding_fn(hypothesis)
+        prompt_emb = self.embedding_fn(prompt)
+        goals_emb = self.embedding_fn(lab_goals)
+        sim_prompt = cosine_similarity([hyp_emb], [prompt_emb])[0][0]
+        sim_goals = cosine_similarity([hyp_emb], [goals_emb])[0][0]
+        return float(np.round(100 * (sim_prompt + sim_goals) / 2, 1))
+
+    def critique(self, hypothesis: str, context_chunks: list, prompt: str, lab_goals: str = LAB_GOALS) -> dict:
+        prompt_text = self.build_prompt(hypothesis, context_chunks)
+        relevancy = self.compute_relevancy(hypothesis, prompt, lab_goals)
         if not self.model:
             # Fallback placeholder
             return {
                 "critique": f"Critique of hypothesis: '{hypothesis}'\n- This is a placeholder critique based on UBR-5 and Dr. Ma's lab context.",
                 "novelty": 100,
                 "accuracy": 100,
-                "verdict": "ACCEPT"
+                "relevancy": relevancy
             }
         response = self.model.models.generate_content(
             model="gemini-2.5-flash",
-            contents=prompt
+            contents=prompt_text
         )
         text = response.text
-        return self._parse_critique(text)
+        result = self._parse_critique(text)
+        result["relevancy"] = relevancy
+        return result
 
     def _parse_critique(self, text: str) -> dict:
-        # Extract critique, novelty, accuracy, and verdict
-        critique_match = re.search(r"Critique:\s*(.*?)(?:\nNovelty Score:|\nAccuracy Score:|\nVerdict:|$)", text, re.DOTALL)
+        # Extract critique, novelty, accuracy, and relevancy (no verdict)
+        critique_match = re.search(r"Critique:\s*(.*?)(?:\nNovelty Score:|\nAccuracy Score:|\nRelevancy Score:|$)", text, re.DOTALL)
         novelty_match = re.search(r"Novelty Score[:\s]+(\d+)", text)
         accuracy_match = re.search(r"Accuracy Score[:\s]+(\d+)", text)
-        verdict_match = re.search(r"Verdict[:\s]+(ACCEPT|REJECT)", text, re.IGNORECASE)
+        relevancy_match = re.search(r"Relevancy Score[:\s]+(\d+)", text)
         return {
             "critique": critique_match.group(1).strip() if critique_match else text,
             "novelty": int(novelty_match.group(1)) if novelty_match else None,
             "accuracy": int(accuracy_match.group(1)) if accuracy_match else None,
-            "verdict": verdict_match.group(1).upper() if verdict_match else None
+            "relevancy": int(relevancy_match.group(1)) if relevancy_match else None
         } 

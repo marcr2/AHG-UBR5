@@ -5,6 +5,9 @@ test_metadata.json
 # Virtual environments
 AHG/
 
+# Excel files
+*.xlsx
+
 # IDE and editor files
 .cursor/
 .vscode/
