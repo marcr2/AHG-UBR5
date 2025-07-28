@@ -18,19 +18,21 @@ def show_menu():
     print("5. Show data status")
     print("6. List loaded batches")
     print("7. Start Enhanced RAG System (with Hypothesis Generation & Critique)")
-    print("8. Exit")
-    print("9. Test Try (UBR-5 demo)")
+    print("8. Check ChromaDB status")
+    print("9. Exit")
+    print("10. Test Try (UBR-5 demo)")
+    print("11. Test Meta-Hypothesis Generator (UBR-5 tumor immunology)")
     print()
 
 def get_user_choice():
     """Get user choice for processing"""
     while True:
         try:
-            choice = input("Enter your choice (1-9): ").strip()
-            if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9']:
+            choice = input("Enter your choice (1-11): ").strip()
+            if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11']:
                 return choice
             else:
-                print("❌ Please enter a number between 1 and 9.")
+                print("❌ Please enter a number between 1 and 11.")
         except KeyboardInterrupt:
             print("\n👋 Goodbye!")
             sys.exit(0)
@@ -75,6 +77,19 @@ def load_data_into_vector_db():
         if not manager.create_collection():
             print("❌ Failed to create ChromaDB collection")
             return False
+        
+        # Check if collection already has data
+        stats = manager.get_collection_stats()
+        if stats.get('total_documents', 0) > 0:
+            print(f"📚 ChromaDB already has {stats.get('total_documents', 0)} documents!")
+            print("💡 ChromaDB uses persistent storage - data is already saved locally.")
+            print("   You can use the Enhanced RAG System directly without reloading.")
+            
+            # Ask user if they want to reload anyway
+            reload_choice = input("\nDo you want to reload the data anyway? (y/n): ").strip().lower()
+            if reload_choice != 'y':
+                print("✅ Using existing ChromaDB data.")
+                return True
         
         total_loaded = 0
         
@@ -261,6 +276,68 @@ def show_data_status():
     else:
         print("   ChromaDB: ❌ Not available")
 
+def check_chromadb_status():
+    """Check detailed ChromaDB status and provide guidance"""
+    print("\n🗄️  ChromaDB Status Check:")
+    print("=" * 40)
+    
+    try:
+        # Initialize manager
+        manager = ChromaDBManager()
+        
+        # Check if ChromaDB directory exists
+        if not os.path.exists("chroma_db"):
+            print("❌ ChromaDB directory not found")
+            print("💡 ChromaDB will be created when you first load data")
+            return
+        
+        # List collections
+        collections = manager.list_collections()
+        if not collections:
+            print("⚠️  No collections found in ChromaDB")
+            print("💡 Run option 4 to load data into ChromaDB")
+            return
+        
+        print(f"✅ ChromaDB is available with {len(collections)} collection(s)")
+        
+        # Check each collection
+        for collection_name in collections:
+            print(f"\n📚 Collection: {collection_name}")
+            
+            if not manager.switch_collection(collection_name):
+                print("   ❌ Failed to access collection")
+                continue
+            
+            # Get statistics
+            stats = manager.get_collection_stats()
+            total_docs = stats.get('total_documents', 0)
+            print(f"   📊 Total documents: {total_docs}")
+            
+            if total_docs == 0:
+                print("   ⚠️  Collection is empty")
+                print("   💡 Run option 4 to load data into this collection")
+            else:
+                print("   ✅ Collection has data - ready for searching!")
+                
+                # Show source breakdown
+                batch_stats = manager.get_batch_statistics()
+                if batch_stats and batch_stats.get('sources'):
+                    print("   📦 Source breakdown:")
+                    for source, source_stats in batch_stats['sources'].items():
+                        print(f"      {source}: {source_stats['total_documents']} documents")
+                
+                # Show metadata keys
+                metadata_keys = stats.get('sample_metadata_keys', [])
+                if metadata_keys:
+                    print(f"   🔑 Metadata keys: {', '.join(metadata_keys[:5])}{'...' if len(metadata_keys) > 5 else ''}")
+        
+        print(f"\n💡 ChromaDB uses persistent storage - data is saved locally in ./chroma_db/")
+        print("   You can use the Enhanced RAG System directly without reloading data!")
+        
+    except Exception as e:
+        print(f"❌ Error checking ChromaDB status: {e}")
+        print("💡 Try running option 4 to initialize ChromaDB")
+
 def quick_list_batches():
     """Quick function to list loaded batches without interactive menu."""
     print("\n📊 Quick Batch Listing:")
@@ -427,7 +504,7 @@ def main():
                 print(f"❌ Error during processing: {e}")
 
         elif choice == '4':
-            show_menu()
+            load_data_into_vector_db()
 
         elif choice == '5':
             show_data_status()
@@ -436,21 +513,25 @@ def main():
             list_loaded_batches()
 
         elif choice == '7':
-            print("\n🚀 Launching Enhanced RAG System with Hypothesis Generation & Critique...\n")
+            print("\n🚀 Launching Enhanced RAG System with Hypothesis Generation & Critique...")
+            print("🆕 NEW: Meta-hypothesis generator available! Use 'meta <query>' command for diverse research directions.\n")
             try:
                 subprocess.run([sys.executable, "enhanced_rag_with_chromadb.py"])
             except Exception as e:
                 print(f"❌ Failed to launch Enhanced RAG System: {e}")
         
         elif choice == '8':
+            check_chromadb_status()
+        
+        elif choice == '9':
             print("👋 Exiting. Goodbye!")
             break
         
-        elif choice == '9':
+        elif choice == '10':
             print("\n🚀 Running Test Try (UBR-5 demo)...\n")
             try:
                 from enhanced_rag_with_chromadb import EnhancedRAGQuery
-                rag = EnhancedRAGQuery(use_chromadb=True, load_data_at_startup=True)
+                rag = EnhancedRAGQuery(use_chromadb=True, load_data_at_startup=False)
                 print("🔍 Searching ChromaDB for 500 results with 'UBR-5'...")
                 results = rag.search_chromadb('UBR-5', top_k=500)
                 if not results:
@@ -472,20 +553,66 @@ def main():
             except Exception as e:
                 print(f"❌ Test Try failed: {e}")
         
+        elif choice == '11':
+            print("\n🧠 Running Meta-Hypothesis Generator Test (UBR-5 tumor immunology)...\n")
+            try:
+                from enhanced_rag_with_chromadb import EnhancedRAGQuery
+                rag = EnhancedRAGQuery(use_chromadb=True, load_data_at_startup=False)
+                
+                # Test the meta-hypothesis generator with the specific prompt
+                test_prompt = "UBR-5 tumor immunology"
+                print(f"🔍 Testing meta-hypothesis generator with prompt: '{test_prompt}'")
+                print("📚 Using default 1500 chunks per meta-hypothesis")
+                print("⏱️  This will generate 5 meta-hypotheses, then 3 hypotheses per meta-hypothesis")
+                print("🚀 Starting meta-hypothesis generation...\n")
+                
+                # Run the meta-hypothesis generator
+                results = rag.generate_hypotheses_with_meta_generator(
+                    user_prompt=test_prompt,
+                    n_per_meta=3,
+                    chunks_per_meta=1500
+                )
+                
+                if results:
+                    print(f"\n🎉 Meta-hypothesis generation completed successfully!")
+                    print(f"📊 Generated {len(results)} total hypotheses across 5 meta-hypotheses")
+                    print(f"💾 Results have been saved to the hypothesis_export folder")
+                else:
+                    print("❌ Meta-hypothesis generation failed or returned no results.")
+                    
+            except Exception as e:
+                print(f"❌ Meta-hypothesis test failed: {e}")
+                import traceback
+                traceback.print_exc()
+        
         # Ask if user wants to continue
-        if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9']:
+        if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11']:
             print(f"\n💡 Next steps:")
             if choice in ['1', '2', '3']:
                 print(f"   - Run option 4 to load data into vector database")
-                print(f"   - Run option 5 to test the vector database")
+                print(f"   - Run option 8 to check ChromaDB status")
+            if choice == '4':
+                print(f"   - Run option 8 to check ChromaDB status")
+                print(f"   - Run option 7 to start the Enhanced RAG System")
+            if choice == '5':
+                print(f"   - Run option 8 to check detailed ChromaDB status")
             if choice == '6':
-                print(f"   - Restart processing with new settings")
+                print(f"   - Run option 8 to check ChromaDB status")
             if choice == '7':
                 print(f"   - The Enhanced RAG System includes hypothesis generation and critique")
-                print(f"   - Use 'hypothesis' command to generate scientific hypotheses")
-                print(f"   - Use 'critique' command to evaluate hypotheses")
-            if choice == '9':
+                print(f"   - Use 'add <query>' to search and generate hypotheses")
+                print(f"   - Use 'meta <query>' for meta-hypothesis generation (5 diverse research directions)")
+                print(f"   - Use 'export' to save results to Excel")
+            if choice == '8':
+                print(f"   - Run option 7 to start the Enhanced RAG System")
+                print(f"   - Run option 4 to load more data if needed")
+            if choice == '10':
                 print(f"   - The Test Try (UBR-5 demo) runs a search and generates hypotheses.")
+            if choice == '11':
+                print(f"   - The Meta-Hypothesis Generator Test automatically runs the meta-hypothesis generator")
+                print(f"   - Uses the prompt 'UBR-5 tumor immunology' to generate 5 diverse research directions")
+                print(f"   - Each meta-hypothesis generates 3 hypotheses with full critique and scoring")
+                print(f"   - Results are automatically exported to the hypothesis_export folder")
             print(f"   - Run 'enhanced_rag_with_chromadb.py' directly for advanced features")
             print()
             

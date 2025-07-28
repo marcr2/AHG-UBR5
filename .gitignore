@@ -6,6 +6,7 @@ test_metadata.json
 AHG/
 
 # Excel files
+hypothesis_export/
 *.xlsx
 
 # IDE and editor files

@@ -6,7 +6,7 @@ import os
 from tqdm.auto import tqdm
 from chromadb_manager import ChromaDBManager
 import logging
-from hypothesis_tools import HypothesisGenerator, HypothesisCritic
+from hypothesis_tools import HypothesisGenerator, HypothesisCritic, MetaHypothesisGenerator, LAB_GOALS
 import time
 import random
 import threading
@@ -115,8 +115,12 @@ class EnhancedRAGQuery:
         self.chroma_manager = None
         self.hypothesis_generator = None
         self.hypothesis_critic = None
+        self.meta_hypothesis_generator = None
         self.last_context_chunks = None
         self.hypothesis_records = []  # Track all hypotheses and results for export
+        
+        # Track the initial "add" quantity for dynamic chunk selection
+        self.initial_add_quantity = None
         self.hypothesis_timer = HypothesisTimer(timeout_minutes=5)  # 5-minute timer
         
         # Package system for collecting search results
@@ -185,6 +189,15 @@ class EnhancedRAGQuery:
     
     def _load_embeddings_data(self):
         """Load all available embedding files."""
+        # Check if ChromaDB already has data
+        if self.use_chromadb and self.chroma_manager:
+            stats = self.chroma_manager.get_collection_stats()
+            if stats.get('total_documents', 0) > 0:
+                logger.info(f"📚 ChromaDB already has {stats.get('total_documents', 0)} documents - skipping data loading")
+                self.embeddings_data = None  # We'll use ChromaDB directly
+                return
+        
+        # Only load embeddings if ChromaDB is empty
         self.embeddings_data = self.load_all_embeddings()
         
         # If ChromaDB is available, populate it
@@ -200,8 +213,10 @@ class EnhancedRAGQuery:
             # Check if collection is empty
             stats = self.chroma_manager.get_collection_stats()
             if stats.get('total_documents', 0) > 0:
-                logger.info("📚 ChromaDB collection already populated")
+                logger.info(f"📚 ChromaDB collection already populated with {stats.get('total_documents', 0)} documents")
                 return
+            
+            logger.info("🔄 Populating ChromaDB with embeddings data...")
             
             # Add embeddings from each source
             for source_name, source_stats in self.embeddings_data["sources"].items():
@@ -221,6 +236,10 @@ class EnhancedRAGQuery:
                 if source_data["chunks"]:
                     self.chroma_manager.add_embeddings_to_collection(source_data, source_name)
                     logger.info(f"✅ Added {len(source_data['chunks'])} embeddings from {source_name}")
+            
+            # Show final stats
+            final_stats = self.chroma_manager.get_collection_stats()
+            logger.info(f"🎉 ChromaDB populated with {final_stats.get('total_documents', 0)} total documents")
         
         except Exception as e:
             logger.error(f"❌ Failed to populate ChromaDB: {e}")
@@ -236,14 +255,11 @@ class EnhancedRAGQuery:
         data = {"model": "models/text-embedding-004", "content": {"parts": [{"text": text}]}}
         
         try:
-            from tqdm.auto import tqdm
-            with tqdm(total=1, desc="Generating query embedding", unit="request") as pbar:
-                # Add timeout to prevent hanging
-                response = requests.post(url, headers=headers, json=data, timeout=30)
-                response.raise_for_status()
-                embedding = response.json()["embedding"]["values"]
-                pbar.update(1)
-                return embedding
+            # Add timeout to prevent hanging
+            response = requests.post(url, headers=headers, json=data, timeout=30)
+            response.raise_for_status()
+            embedding = response.json()["embedding"]["values"]
+            return embedding
         except requests.exceptions.Timeout:
             logger.error("❌ Query embedding request timed out (30s)")
             return None
@@ -336,40 +352,29 @@ class EnhancedRAGQuery:
                     source_embeddings = 0
                     
                     # Add progress bar for batch loading
-                    from tqdm.auto import tqdm
-                    with tqdm(total=len(batch_files), desc=f"Loading {source_dir} batches", unit="batch") as pbar:
-                        for batch_file in batch_files:
-                            batch_path = os.path.join(source_path, batch_file)
-                            try:
-                                with open(batch_path, 'r', encoding='utf-8') as f:
-                                    batch_data = json.load(f)
-                                
-                                # Add source information to metadata
-                                for meta in batch_data.get("metadata", []):
-                                    meta["source_file"] = source_dir
-                                
-                                # Append to combined data
-                                batch_chunks = len(batch_data.get("chunks", []))
-                                batch_embeddings = len(batch_data.get("embeddings", []))
-                                
-                                all_data["chunks"].extend(batch_data.get("chunks", []))
-                                all_data["embeddings"].extend(batch_data.get("embeddings", []))
-                                all_data["metadata"].extend(batch_data.get("metadata", []))
-                                
-                                source_chunks += batch_chunks
-                                source_embeddings += batch_embeddings
-                                
-                                # Update progress bar with batch info
-                                pbar.set_postfix({
-                                    "chunks": batch_chunks,
-                                    "embeddings": batch_embeddings,
-                                    "total": source_chunks
-                                })
-                                
-                            except Exception as e:
-                                logger.error(f"❌ Failed to load batch {batch_file}: {e}")
+                    for batch_file in batch_files:
+                        batch_path = os.path.join(source_path, batch_file)
+                        try:
+                            with open(batch_path, 'r', encoding='utf-8') as f:
+                                batch_data = json.load(f)
                             
-                            pbar.update(1)
+                            # Add source information to metadata
+                            for meta in batch_data.get("metadata", []):
+                                meta["source_file"] = source_dir
+                            
+                            # Append to combined data
+                            batch_chunks = len(batch_data.get("chunks", []))
+                            batch_embeddings = len(batch_data.get("embeddings", []))
+                            
+                            all_data["chunks"].extend(batch_data.get("chunks", []))
+                            all_data["embeddings"].extend(batch_data.get("embeddings", []))
+                            all_data["metadata"].extend(batch_data.get("metadata", []))
+                            
+                            source_chunks += batch_chunks
+                            source_embeddings += batch_embeddings
+                            
+                        except Exception as e:
+                            logger.error(f"❌ Failed to load batch {batch_file}: {e}")
                     
                     # Track source statistics
                     if source_chunks > 0:
@@ -392,6 +397,12 @@ class EnhancedRAGQuery:
     def search_chromadb(self, query, top_k=5, filter_dict=None, show_progress=True):
         """Search using ChromaDB."""
         if not self.use_chromadb or not self.chroma_manager:
+            print("❌ ChromaDB not available. Please initialize with ChromaDB enabled.")
+            return []
+        
+        # Check if ChromaDB has data
+        if not self.is_chromadb_ready():
+            print("❌ ChromaDB is empty. Please load data first using the master processor (option 4).")
             return []
         
         # Get query embedding
@@ -399,22 +410,12 @@ class EnhancedRAGQuery:
         if not query_embedding:
             return []
         
-        # Search in ChromaDB with progress bar
-        from tqdm.auto import tqdm
-        if show_progress:
-            with tqdm(total=1, desc="ChromaDB search", unit="operation") as pbar:
-                results = self.chroma_manager.search_similar(
-                    query_embedding=query_embedding,
-                    n_results=top_k,
-                    where_filter=filter_dict
-                )
-                pbar.update(1)
-        else:
-            results = self.chroma_manager.search_similar(
-                query_embedding=query_embedding,
-                n_results=top_k,
-                where_filter=filter_dict
-            )
+        # Search in ChromaDB
+        results = self.chroma_manager.search_similar(
+            query_embedding=query_embedding,
+            n_results=top_k,
+            where_filter=filter_dict
+        )
         
         return results
     
@@ -478,7 +479,25 @@ class EnhancedRAGQuery:
         """Display comprehensive statistics about the knowledge base."""
         print(f"[display_statistics] Knowledge Base Statistics:")
         print("=" * 50)
+        
+        # Show ChromaDB stats if available (primary data source)
+        if self.use_chromadb and self.chroma_manager:
+            print(f"[display_statistics] ChromaDB Statistics (Primary Data Source):")
+            chroma_stats = self.chroma_manager.get_collection_stats()
+            print(f"   📊 Total documents: {chroma_stats.get('total_documents', 0)}")
+            print(f"   📊 Collection name: {chroma_stats.get('collection_name', 'N/A')}")
+            print(f"   📊 Available collections: {self.chroma_manager.list_collections()}")
+            
+            # Show source breakdown if available
+            batch_stats = self.chroma_manager.get_batch_statistics()
+            if batch_stats and batch_stats.get('sources'):
+                print(f"[display_statistics] Source Breakdown:")
+                for source, stats in batch_stats['sources'].items():
+                    print(f"   {source}: {stats['total_documents']} documents, {len(stats['batches'])} batches")
+        
+        # Show in-memory data stats if available (secondary/fallback)
         if self.embeddings_data:
+            print(f"[display_statistics] In-Memory Data Statistics (Secondary):")
             total_chunks = len(self.embeddings_data["chunks"])
             total_embeddings = len(self.embeddings_data["embeddings"])
             print(f"   📈 Total chunks: {total_chunks}")
@@ -492,12 +511,8 @@ class EnhancedRAGQuery:
                     source_stats = stats["stats"]
                     print(f"     - Papers: {source_stats.get('total_papers', 'N/A')}")
                     print(f"     - Embeddings: {source_stats.get('total_embeddings', 'N/A')}")
-        if self.use_chromadb and self.chroma_manager:
-            print(f"[display_statistics] ChromaDB Statistics:")
-            chroma_stats = self.chroma_manager.get_collection_stats()
-            print(f"   Total documents: {chroma_stats.get('total_documents', 0)}")
-            print(f"   Collection name: {chroma_stats.get('collection_name', 'N/A')}")
-            print(f"   Available collections: {self.chroma_manager.list_collections()}")
+        else:
+            print(f"[display_statistics] In-Memory Data: Not loaded (using ChromaDB directly)")
     
     def extract_citations_from_chunks(self, context_chunks):
         """Extract citation information from context chunks used for hypothesis critique."""
@@ -559,23 +574,15 @@ class EnhancedRAGQuery:
         
         return "; ".join(formatted_citations)
 
-    def retrieve_relevant_chunks(self, query, top_k=20):
+    def retrieve_relevant_chunks(self, query, top_k=1500):
         """Retrieve the most relevant chunks from all loaded batches using ChromaDB."""
         if not self.use_chromadb or not self.chroma_manager:
             print("❌ ChromaDB not available.")
             return []
         
-        # Load data on-demand if not loaded at startup
-        if not self.embeddings_data:
-            print("📚 Loading embeddings data on-demand...")
-            self.embeddings_data = self.load_all_embeddings()
-            if not self.embeddings_data:
-                return []
-        
-        # Get all documents (chunks) from the collection
-        all_docs = self.chroma_manager.get_all_documents()
-        if not all_docs:
-            print("❌ No documents found in ChromaDB.")
+        # Check if ChromaDB has data
+        if not self.is_chromadb_ready():
+            print("❌ ChromaDB is empty. Please load data first using the master processor (option 4).")
             return []
         
         # Get query embedding
@@ -584,26 +591,65 @@ class EnhancedRAGQuery:
             print("❌ Failed to get query embedding.")
             return []
         
-        # Compute cosine similarity for all chunks
-        doc_embeddings = np.array([doc['metadata'].get('embedding', None) for doc in all_docs])
-        # If embeddings are not stored in metadata, fallback to ChromaDB search
-        if doc_embeddings[0] is None:
-            # Use ChromaDB search_similar as fallback
-            return self.search_chromadb(query, top_k=top_k)
+        # Use ChromaDB search directly - much faster than loading all documents
+        print(f"🔍 Searching ChromaDB for '{query}' (requesting {top_k} results)...")
+        results = self.chroma_manager.search_similar(
+            query_embedding=query_embedding,
+            n_results=top_k
+        )
         
-        # Add progress bar for similarity computation
-        from tqdm.auto import tqdm
-        total_docs = len(all_docs)
-        print(f"🔍 Computing similarities across {total_docs:,} ChromaDB documents...")
+        if not results:
+            print("❌ No results found in ChromaDB.")
+            return []
         
-        similarities = cosine_similarity([query_embedding], doc_embeddings)[0]
-        top_indices = np.argsort(similarities)[::-1][:top_k]
+        print(f"✅ Found {len(results)} relevant chunks from ChromaDB")
         
-        # Return chunks with their metadata for citation tracking
-        return [all_docs[i] for i in top_indices]
+        # Return results in the expected format
+        return results
+
+    def select_dynamic_chunks_for_generation(self, query, num_chunks=None):
+        """Select new chunks from ChromaDB for hypothesis generation, using the initial add quantity."""
+        if not self.use_chromadb or not self.chroma_manager:
+            print("❌ ChromaDB not available for dynamic chunk selection.")
+            return None
+        
+        # Use initial add quantity if not specified
+        if num_chunks is None:
+            if self.initial_add_quantity is None:
+                print("⚠️  No initial add quantity stored, using default of 500 chunks")
+                num_chunks = 500
+            else:
+                num_chunks = self.initial_add_quantity
+                print(f"🔄 Selecting {num_chunks} new chunks from ChromaDB (based on initial add quantity)")
+        
+        try:
+            # Get new chunks from ChromaDB using the original query
+            if "prompt" in self.current_package and self.current_package["prompt"]:
+                search_query = self.current_package["prompt"]
+            else:
+                search_query = query
+            
+            print(f"🔍 Searching ChromaDB for '{search_query}' to select {num_chunks} new chunks...")
+            
+            # Use hybrid search to get diverse results
+            results = self.search_hybrid(search_query, top_k=num_chunks, filter_dict=None)
+            
+            if not results:
+                print("❌ No new chunks found in ChromaDB.")
+                return None
+            
+            # Extract just the chunk text for generation
+            new_chunks = [result['chunk'] for result in results]
+            print(f"✅ Selected {len(new_chunks)} new chunks from ChromaDB for this hypothesis generation")
+            
+            return new_chunks
+            
+        except Exception as e:
+            print(f"❌ Error selecting dynamic chunks: {e}")
+            return None
 
     @staticmethod
-    def automated_verdict(accuracy, novelty, relevancy, accuracy_threshold=80, novelty_threshold=85, relevancy_threshold=90):
+    def automated_verdict(accuracy, novelty, relevancy, accuracy_threshold=80, novelty_threshold=85, relevancy_threshold=50):
         if accuracy is not None and novelty is not None and relevancy is not None:
             return "ACCEPTED" if (accuracy >= accuracy_threshold and novelty >= novelty_threshold and relevancy >= relevancy_threshold) else "REJECTED"
         return "REJECTED"
@@ -622,7 +668,7 @@ class EnhancedRAGQuery:
             print(f"[iterative_hypothesis_generation] Using {len(context_chunks)} previously found context chunks for hypothesis generation.")
         else:
             print(f"[iterative_hypothesis_generation] Searching all loaded batches for relevant context...")
-            context_chunks = self.retrieve_relevant_chunks(user_prompt, top_k=20)
+            context_chunks = self.retrieve_relevant_chunks(user_prompt, top_k=1500)
             if not context_chunks:
                 print("[iterative_hypothesis_generation] ERROR: No relevant context found.")
                 return
@@ -666,7 +712,7 @@ class EnhancedRAGQuery:
                             })
                             pbar.update(1)
                             continue
-                        critique_result = self.hypothesis_critic.critique(hypotheses[i], context_texts, prompt=user_prompt)
+                        critique_result = self.hypothesis_critic.critique(hypotheses[i], context_texts, prompt=user_prompt, lab_goals=LAB_GOALS)
                         if self.hypothesis_timer.check_expired():
                             print(f"[iterative_hypothesis_generation] TIMEOUT: Hypothesis {i+1} critique timed out after critique.")
                             citations = self.extract_citations_from_chunks(context_chunks)
@@ -685,11 +731,11 @@ class EnhancedRAGQuery:
                         novelty = critique_result.get('novelty', 0)
                         accuracy = critique_result.get('accuracy', 0)
                         relevancy = critique_result.get('relevancy', 0)
-                        verdict = self.automated_verdict(accuracy, novelty, relevancy)
+                        verdict = self.automated_verdict(accuracy, novelty, relevancy, accuracy_threshold, novelty_threshold, relevancy_threshold)
                         remaining_time = self.hypothesis_timer.get_remaining_time()
                         print(f"\033[1mHypothesis {i+1}:\033[0m \033[96m{hypotheses[i]}\033[0m")
                         print(f"[iterative_hypothesis_generation] Critique: {critique_result['critique']}")
-                        print(f"[iterative_hypothesis_generation] Scores: Novelty={novelty}, Accuracy={accuracy}, Relevancy={relevancy}, Automated Verdict={verdict}, Time left={remaining_time:.1f}s")
+                        print(f"[iterative_hypothesis_generation] Scores: Novelty={novelty}/{novelty_threshold}, Accuracy={accuracy}/{accuracy_threshold}, Relevancy={relevancy}/{relevancy_threshold}, Automated Verdict={verdict}, Time left={remaining_time:.1f}s")
                         citations = self.extract_citations_from_chunks(context_chunks)
                         formatted_citations = self.format_citations_for_export(citations)
                         self.hypothesis_records.append({
@@ -702,10 +748,10 @@ class EnhancedRAGQuery:
                             'Citations': formatted_citations
                         })
                         if verdict == 'ACCEPTED':
-                            print(f"\033[92mACCEPTED\033[0m: Hypothesis {i+1} (Novelty: {novelty} >= {novelty_threshold}, Accuracy: {accuracy} >= {accuracy_threshold}, Relevancy: {relevancy} >= {relevancy_threshold})")
+                            print(f"\033[92mACCEPTED\033[0m: Hypothesis {i+1} (Novelty: {novelty}/{novelty_threshold}, Accuracy: {accuracy}/{accuracy_threshold}, Relevancy: {relevancy}/{relevancy_threshold})")
                             accepted[i] = True
                         else:
-                            print(f"\033[91mREJECTED\033[0m: Hypothesis {i+1} (Novelty: {novelty} < {novelty_threshold} or Accuracy: {accuracy} < {accuracy_threshold} or Relevancy: {relevancy} < {relevancy_threshold}) - Regenerating...")
+                            print(f"\033[91mREJECTED\033[0m: Hypothesis {i+1} (Novelty: {novelty}/{novelty_threshold}, Accuracy: {accuracy}/{accuracy_threshold}, Relevancy: {relevancy}/{relevancy_threshold}) - Regenerating...")
                             if self.hypothesis_timer.check_expired():
                                 print(f"[iterative_hypothesis_generation] TIMEOUT: Hypothesis {i+1} regeneration timed out.")
                                 pbar.update(1)
@@ -750,7 +796,7 @@ class EnhancedRAGQuery:
             print(f"   {i}. {hyp} [{status}]")
             if isinstance(critiques[i-1], dict) and critiques[i-1]:
                 print(f"      Critique: {critiques[i-1].get('critique','')}")
-                print(f"      Novelty: {critiques[i-1].get('novelty','')}, Accuracy: {critiques[i-1].get('accuracy','')}, Relevancy: {critiques[i-1].get('relevancy','')}, Automated Verdict: {self.automated_verdict(critiques[i-1].get('accuracy',0), critiques[i-1].get('novelty',0), critiques[i-1].get('relevancy',0))} ({self.automated_verdict(critiques[i-1].get('accuracy',0), critiques[i-1].get('novelty',0), critiques[i-1].get('relevancy',0), accuracy_threshold=accuracy_threshold, novelty_threshold=novelty_threshold, relevancy_threshold=relevancy_threshold)})")
+                print(f"      Novelty: {critiques[i-1].get('novelty','')}/{novelty_threshold}, Accuracy: {critiques[i-1].get('accuracy','')}/{accuracy_threshold}, Relevancy: {critiques[i-1].get('relevancy','')}/{relevancy_threshold}, Automated Verdict: {self.automated_verdict(critiques[i-1].get('accuracy',0), critiques[i-1].get('novelty',0), critiques[i-1].get('relevancy',0), accuracy_threshold, novelty_threshold, relevancy_threshold)}")
         return hypotheses
 
     def add_to_package(self, search_results):
@@ -763,6 +809,12 @@ class EnhancedRAGQuery:
             response = input("Continue anyway? (y/n): ").lower()
             if response != 'y':
                 return
+        
+        # Store the initial add quantity for dynamic chunk selection
+        if self.initial_add_quantity is None:
+            self.initial_add_quantity = len(search_results)
+            print(f"[add_to_package] Stored initial add quantity: {self.initial_add_quantity} chunks for dynamic selection")
+        
         for result in search_results:
             chunk = result.get("chunk", "")
             metadata = result.get("metadata", {})
@@ -783,7 +835,10 @@ class EnhancedRAGQuery:
             "sources": set(),
             "total_chars": 0
         }
+        # Reset the initial add quantity when clearing package
+        self.initial_add_quantity = None
         print("[clear_package] Package cleared.")
+        print("[clear_package] Initial add quantity reset.")
 
     def show_package(self):
         """Display information about the current package."""
@@ -832,39 +887,76 @@ class EnhancedRAGQuery:
         # For generation, use a sample of the database instead of the entire thing
         # This prevents the 300MB payload limit error
         if not self.embeddings_data:
-            print("📚 Loading embeddings data...")
-            self.embeddings_data = self.load_all_embeddings()
-            if not self.embeddings_data:
-                print("❌ No embeddings data available")
-                return
-        
-        all_chunks = self.embeddings_data["chunks"]
+            # Check if ChromaDB has data first
+            if self.use_chromadb and self.chroma_manager and self.is_chromadb_ready():
+                print("📚 ChromaDB has data - using package chunks for generation (no need to load embeddings)")
+                # Use only the package chunks for generation when ChromaDB is available
+                all_chunks = self.current_package["chunks"]
+            else:
+                print("📚 Loading embeddings data...")
+                self.embeddings_data = self.load_all_embeddings()
+                if not self.embeddings_data:
+                    print("❌ No embeddings data available")
+                    return
+                all_chunks = self.embeddings_data["chunks"]
+        else:
+            all_chunks = self.embeddings_data["chunks"]
         package_chunks = self.current_package["chunks"]
         package_metadata = self.current_package["metadata"]
         
         # Calculate safe sample size (aim for ~50MB payload)
         # Each chunk is roughly 1000 characters, so 50MB = ~50,000 chunks
         max_chunks_for_generation = 50000
-        if len(all_chunks) > max_chunks_for_generation:
-            print(f"📚 Database contains {len(all_chunks)} total chunks")
-            print(f"📚 Using sample of {max_chunks_for_generation} chunks for generation (to avoid API limits)")
-            # Take a representative sample from different parts of the database
-            step = len(all_chunks) // max_chunks_for_generation
-            generation_chunks = all_chunks[::step][:max_chunks_for_generation]
-        else:
+        
+        # Check if we're using package chunks (from ChromaDB) or all chunks (from embeddings)
+        if all_chunks is self.current_package["chunks"]:
+            # Using package chunks from ChromaDB
             generation_chunks = all_chunks
-            print(f"📚 Database contains {len(all_chunks)} total chunks")
+            print(f"📚 Using {len(generation_chunks)} package chunks from ChromaDB for generation")
+        else:
+            # Using all chunks from embeddings data
+            if len(all_chunks) > max_chunks_for_generation:
+                print(f"📚 Database contains {len(all_chunks)} total chunks")
+                print(f"📚 Using sample of {max_chunks_for_generation} chunks for generation (to avoid API limits)")
+                # Take a representative sample from different parts of the database
+                step = len(all_chunks) // max_chunks_for_generation
+                generation_chunks = all_chunks[::step][:max_chunks_for_generation]
+            else:
+                generation_chunks = all_chunks
+                print(f"📚 Database contains {len(all_chunks)} total chunks")
         
         print(f"📦 Package contains {len(package_chunks)} chunks")
         
         # Sequential, real-time generator-critic loop for 5 accepted hypotheses
         print(f"\n🧠 Generating hypotheses one at a time until 5 are accepted (novelty >= {novelty_threshold}, accuracy >= {accuracy_threshold}, 5-minute time limit per critique)...")
+        
+        # Initialize Excel file for incremental saving
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Ensure hypothesis_export directory exists
+        export_dir = "hypothesis_export"
+        os.makedirs(export_dir, exist_ok=True)
+        excel_filename = os.path.join(export_dir, f"hypothesis_export_{timestamp}.xlsx")
+        print(f"💾 Will save hypotheses incrementally to: {excel_filename}")
+        
         accepted_hypotheses = []
         attempts = 0
         max_attempts = 100  # Prevent infinite loops
         while len(accepted_hypotheses) < n and attempts < max_attempts:
             attempts += 1
             print(f"\n🧠 Generating hypothesis attempt {attempts}...")
+            
+            # Select new chunks from ChromaDB for this hypothesis generation
+            if self.use_chromadb and self.chroma_manager and self.initial_add_quantity:
+                print(f"🔄 Selecting new chunks for hypothesis attempt {attempts}...")
+                dynamic_chunks = self.select_dynamic_chunks_for_generation(package_prompt)
+                if dynamic_chunks:
+                    generation_chunks = dynamic_chunks
+                    print(f"📚 Using {len(generation_chunks)} dynamically selected chunks for generation")
+                else:
+                    print(f"⚠️  Failed to select dynamic chunks, using original chunks")
+            else:
+                print(f"📚 Using original chunks for generation (no dynamic selection available)")
             
             # Start timer for this hypothesis
             self.hypothesis_timer.start()
@@ -874,14 +966,17 @@ class EnhancedRAGQuery:
             if not hypothesis_list:
                 print("❌ Failed to generate hypothesis. Skipping...")
                 # Record failed generation
-                self.hypothesis_records.append({
+                failed_record = {
                     'Hypothesis': f'Failed generation attempt {attempts}',
                     'Accuracy': None,
                     'Novelty': None,
                     'Verdict': 'GENERATION_FAILED',
                     'Critique': 'Failed to generate hypothesis',
                     'Citations': 'No citations available'
-                })
+                }
+                self.hypothesis_records.append(failed_record)
+                # Save incrementally
+                self.save_hypothesis_record_incrementally(failed_record, excel_filename)
                 continue
             
             hypothesis = hypothesis_list[0]
@@ -892,50 +987,60 @@ class EnhancedRAGQuery:
             if self.hypothesis_timer.check_expired():
                 print(f"⏰ Time limit reached for hypothesis attempt {attempts}. Moving to next attempt.")
                 # Record timeout result
-                self.hypothesis_records.append({
+                timeout_record = {
                     'Hypothesis': hypothesis,
                     'Accuracy': None,
                     'Novelty': None,
                     'Verdict': 'TIMEOUT',
                     'Critique': 'Critique process timed out after 5 minutes',
                     'Citations': 'No citations available'
-                })
+                }
+                self.hypothesis_records.append(timeout_record)
+                # Save incrementally
+                self.save_hypothesis_record_incrementally(timeout_record, excel_filename)
                 continue
             
             critique_result = self._critique_hypothesis_with_retry(hypothesis, package_chunks, package_prompt)
             if not critique_result:
                 print(f"❌ Failed to critique hypothesis after retries. Skipping...")
                 # Record failed critique
-                self.hypothesis_records.append({
+                critique_failed_record = {
                     'Hypothesis': hypothesis,
                     'Accuracy': None,
                     'Novelty': None,
                     'Verdict': 'CRITIQUE_FAILED',
                     'Critique': 'Failed to critique hypothesis after retries',
                     'Citations': 'No citations available'
-                })
+                }
+                self.hypothesis_records.append(critique_failed_record)
+                # Save incrementally
+                self.save_hypothesis_record_incrementally(critique_failed_record, excel_filename)
                 continue
             
             # Check timer after critique
             if self.hypothesis_timer.check_expired():
                 print(f"⏰ Time limit reached for hypothesis attempt {attempts} after critique. Moving to next attempt.")
                 # Record timeout result with partial critique
-                self.hypothesis_records.append({
+                partial_timeout_record = {
                     'Hypothesis': hypothesis,
                     'Accuracy': critique_result.get('accuracy', None),
                     'Novelty': critique_result.get('novelty', None),
                     'Verdict': 'TIMEOUT',
                     'Critique': critique_result.get('critique', '') + ' [Process timed out]',
                     'Citations': 'No citations available'
-                })
+                }
+                self.hypothesis_records.append(partial_timeout_record)
+                # Save incrementally
+                self.save_hypothesis_record_incrementally(partial_timeout_record, excel_filename)
                 continue
             
             novelty = critique_result.get('novelty', 0)
             accuracy = critique_result.get('accuracy', 0)
             relevancy = critique_result.get('relevancy', 0)
-            verdict = self.automated_verdict(accuracy, novelty, relevancy)
+            # Use the same thresholds as the acceptance logic
+            verdict = self.automated_verdict(accuracy, novelty, relevancy, accuracy_threshold, novelty_threshold, relevancy_threshold)
             remaining_time = self.hypothesis_timer.get_remaining_time()
-            print(f"   Novelty: {novelty}, Accuracy: {accuracy}, Relevancy: {relevancy}, Automated Verdict: {verdict}")
+            print(f"   Novelty: {novelty}/{novelty_threshold}, Accuracy: {accuracy}/{accuracy_threshold}, Relevancy: {relevancy}/{relevancy_threshold}, Automated Verdict: {verdict}")
             print(f"   ⏱️  Time remaining: {remaining_time:.1f}s")
             
             # Extract citations from package metadata
@@ -968,7 +1073,7 @@ class EnhancedRAGQuery:
             formatted_citations = self.format_citations_for_export(citations)
             
             # Track record for export
-            self.hypothesis_records.append({
+            hypothesis_record = {
                 'Hypothesis': hypothesis,
                 'Accuracy': accuracy,
                 'Novelty': novelty,
@@ -976,9 +1081,13 @@ class EnhancedRAGQuery:
                 'Verdict': verdict,
                 'Critique': critique_result.get('critique', ''),
                 'Citations': formatted_citations
-            })
+            }
+            self.hypothesis_records.append(hypothesis_record)
             
-            if novelty is not None and accuracy is not None and novelty >= novelty_threshold and accuracy >= accuracy_threshold and relevancy >= relevancy_threshold:
+            # Save incrementally to Excel
+            self.save_hypothesis_record_incrementally(hypothesis_record, excel_filename)
+            
+            if verdict == 'ACCEPTED':
                 accepted_hypotheses.append({
                     "hypothesis": hypothesis,
                     "critique": critique_result,
@@ -986,7 +1095,7 @@ class EnhancedRAGQuery:
                 })
                 print(f"✅ Hypothesis accepted! ({len(accepted_hypotheses)}/{n})-----------------------------------\n")
             else:
-                print(f"❌ Hypothesis rejected (novelty or accuracy below threshold: Novelty < {novelty_threshold} or Accuracy < {accuracy_threshold} or Relevancy < {relevancy_threshold})-----------------------------------\n")
+                print(f"❌ Hypothesis rejected (verdict: {verdict})-----------------------------------\n")
         
         if not accepted_hypotheses:
             print("❌ No hypotheses were successfully critiqued.")
@@ -1003,7 +1112,7 @@ class EnhancedRAGQuery:
             print(f"   Novelty: {critique.get('novelty', 'N/A')}")
             print(f"   Accuracy: {critique.get('accuracy', 'N/A')}")
             print(f"   Relevancy: {critique.get('relevancy', 'N/A')}")
-            print(f"   Automated Verdict: {self.automated_verdict(critique.get('accuracy', 0), critique.get('novelty', 0), critique.get('relevancy', 0))} ({self.automated_verdict(critique.get('accuracy', 0), critique.get('novelty', 0), critique.get('relevancy', 0), accuracy_threshold=accuracy_threshold, novelty_threshold=novelty_threshold, relevancy_threshold=relevancy_threshold)})")
+            print(f"   Automated Verdict: {self.automated_verdict(critique.get('accuracy', 0), critique.get('novelty', 0), critique.get('relevancy', 0), accuracy_threshold, novelty_threshold, relevancy_threshold)}")
             print(f"   Critique: {critique.get('critique', 'N/A')}")
             print("-" * 80)
         return accepted_hypotheses[:n]
@@ -1059,7 +1168,7 @@ class EnhancedRAGQuery:
                 
                 # Extract chunk text from package chunks
                 package_chunk_texts = [chunk for chunk in package_chunks]
-                critique_result = self.hypothesis_critic.critique(hypothesis, package_chunk_texts, prompt=prompt)
+                critique_result = self.hypothesis_critic.critique(hypothesis, package_chunk_texts, prompt=prompt, lab_goals=LAB_GOALS)
                 return critique_result
             except Exception as e:
                 error_str = str(e)
@@ -1141,6 +1250,203 @@ class EnhancedRAGQuery:
         
         return hypotheses[:n]
 
+    def generate_hypotheses_with_meta_generator(self, user_prompt: str, n_per_meta: int = 3, chunks_per_meta: int = 1500):
+        """
+        Generate hypotheses using the meta-hypothesis generator approach.
+        
+        This method:
+        1. Takes the user's prompt and generates 5 meta-hypotheses
+        2. For each meta-hypothesis, generates n_per_meta hypotheses using the existing system
+        3. Returns all generated hypotheses with their critiques
+        
+        Args:
+            user_prompt: The original user query
+            n_per_meta: Number of hypotheses to generate per meta-hypothesis (default: 3)
+            chunks_per_meta: Number of context chunks to use per meta-hypothesis (default: 1500)
+        """
+        if not self.meta_hypothesis_generator or not self.hypothesis_generator or not self.hypothesis_critic:
+            print("❌ Meta-hypothesis tools not initialized. Check if Gemini API key is available.")
+            return None
+        
+        print(f"\n🧠 META-HYPOTHESIS GENERATION SESSION")
+        print("=" * 80)
+        print(f"Original Query: {user_prompt}")
+        print(f"Generating {n_per_meta} hypotheses per meta-hypothesis")
+        print("=" * 80)
+        
+        # Step 1: Generate meta-hypotheses
+        print(f"\n🔍 Step 1: Generating 5 meta-hypotheses from user query...")
+        try:
+            meta_hypotheses = self.meta_hypothesis_generator.generate_meta_hypotheses(user_prompt)
+            if not meta_hypotheses or len(meta_hypotheses) < 5:
+                print("❌ Failed to generate sufficient meta-hypotheses")
+                return None
+            
+            print(f"✅ Generated {len(meta_hypotheses)} meta-hypotheses:")
+            for i, meta_hyp in enumerate(meta_hypotheses, 1):
+                print(f"  {i}. {meta_hyp}")
+        except Exception as e:
+            print(f"❌ Error generating meta-hypotheses: {e}")
+            return None
+        
+        # Step 2: For each meta-hypothesis, generate hypotheses
+        all_hypotheses = []
+        total_meta_hypotheses = len(meta_hypotheses)
+        
+        # Initialize Excel file for incremental saving
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Ensure hypothesis_export directory exists
+        export_dir = "hypothesis_export"
+        os.makedirs(export_dir, exist_ok=True)
+        excel_filename = os.path.join(export_dir, f"meta_hypothesis_export_{timestamp}.xlsx")
+        print(f"💾 Will save meta-hypotheses incrementally to: {excel_filename}")
+        
+        # Initialize hypothesis records for this session
+        self.hypothesis_records = []
+        
+        for meta_idx, meta_hypothesis in enumerate(meta_hypotheses, 1):
+            print(f"\n🔍 Step 2.{meta_idx}: Generating hypotheses for meta-hypothesis {meta_idx}/{total_meta_hypotheses}")
+            print(f"Meta-hypothesis: {meta_hypothesis}")
+            print("-" * 60)
+            
+            # Get relevant context for this meta-hypothesis
+            context_chunks = self.retrieve_relevant_chunks(meta_hypothesis, top_k=chunks_per_meta)
+            if not context_chunks:
+                print(f"⚠️  No relevant context found for meta-hypothesis {meta_idx}. Skipping...")
+                continue
+            
+            print(f"📚 Found {len(context_chunks)} relevant context chunks (using {chunks_per_meta} chunks per meta-hypothesis)")
+            
+            # Generate hypotheses for this meta-hypothesis
+            meta_hypotheses_generated = []
+            attempts = 0
+            max_attempts = n_per_meta * 3  # Allow more attempts to get enough hypotheses
+            
+            while len(meta_hypotheses_generated) < n_per_meta and attempts < max_attempts:
+                attempts += 1
+                print(f"\n🧠 Generating hypothesis attempt {attempts} for meta-hypothesis {meta_idx}...")
+                
+                # Select new chunks from ChromaDB for this hypothesis generation
+                if self.use_chromadb and self.chroma_manager and self.initial_add_quantity:
+                    print(f"🔄 Selecting new chunks for hypothesis attempt {attempts}...")
+                    dynamic_chunks = self.select_dynamic_chunks_for_generation(meta_hypothesis)
+                    if dynamic_chunks:
+                        context_chunks = dynamic_chunks
+                        print(f"📚 Using {len(context_chunks)} dynamically selected chunks for generation")
+                    else:
+                        print(f"⚠️  Failed to select dynamic chunks, using original chunks")
+                else:
+                    print(f"📚 Using original chunks for generation (no dynamic selection available)")
+                
+                # Start timer for this hypothesis
+                self.hypothesis_timer.start()
+                print(f"⏱️  Starting 5-minute timer for hypothesis attempt {attempts}...")
+                
+                # Generate hypothesis
+                try:
+                    context_texts = [chunk.get("document", "") if isinstance(chunk, dict) else chunk for chunk in context_chunks]
+                    hypothesis_list = self.hypothesis_generator.generate(context_texts, n=1)
+                    
+                    if not hypothesis_list:
+                        print("❌ Failed to generate hypothesis. Skipping...")
+                        continue
+                    
+                    hypothesis = hypothesis_list[0]
+                    print(f"📝 Generated: {hypothesis}")
+                    
+                    # Check timer before critique
+                    if self.hypothesis_timer.check_expired():
+                        print(f"⏰ Time limit reached before critique")
+                        continue
+                    
+                    # Critique hypothesis
+                    print(f"🔍 Critiquing hypothesis...")
+                    critique_result = self.hypothesis_critic.critique(hypothesis, context_texts, prompt=meta_hypothesis, lab_goals=LAB_GOALS)
+                    
+                    if critique_result:
+                        novelty = critique_result.get('novelty')
+                        accuracy = critique_result.get('accuracy')
+                        relevancy = critique_result.get('relevancy')
+                        critique = critique_result.get('critique', 'No critique available')
+                        
+                        # Determine verdict
+                        verdict = self.automated_verdict(accuracy, novelty, relevancy)
+                        
+                        # Extract citations
+                        citations = self.extract_citations_from_chunks(context_chunks)
+                        formatted_citations = self.format_citations_for_export(citations)
+                        
+                        # Create record
+                        record = {
+                            'Meta_Hypothesis': meta_hypothesis,
+                            'Meta_Hypothesis_Index': meta_idx,
+                            'Hypothesis': hypothesis,
+                            'Accuracy': accuracy,
+                            'Novelty': novelty,
+                            'Relevancy': relevancy,
+                            'Verdict': verdict,
+                            'Critique': critique,
+                            'Citations': formatted_citations,
+                            'Original_Query': user_prompt
+                        }
+                        
+                        # Add to records
+                        self.hypothesis_records.append(record)
+                        
+                        # Save incrementally to Excel
+                        self.save_hypothesis_record_incrementally(record, excel_filename)
+                        
+                        # Display result
+                        print(f"\n📊 Hypothesis Result:")
+                        print(f"   Novelty: {novelty}/85")
+                        print(f"   Accuracy: {accuracy}/80")
+                        print(f"   Relevancy: {relevancy}/50")
+                        print(f"   Verdict: {verdict}")
+                        
+                        # Accept hypothesis if it meets criteria
+                        if verdict == "ACCEPTED":
+                            meta_hypotheses_generated.append(record)
+                            print(f"✅ Hypothesis accepted for meta-hypothesis {meta_idx}!")
+                        else:
+                            print(f"❌ Hypothesis rejected for meta-hypothesis {meta_idx}")
+                        
+                        # Check timer
+                        if self.hypothesis_timer.check_expired():
+                            print(f"⏰ Time limit reached for meta-hypothesis {meta_idx}. Moving to next meta-hypothesis.")
+                            break
+                    
+                except Exception as e:
+                    print(f"❌ Error generating/critiquing hypothesis: {e}")
+                    continue
+            
+            print(f"✅ Generated {len(meta_hypotheses_generated)} hypotheses for meta-hypothesis {meta_idx}")
+            all_hypotheses.extend(meta_hypotheses_generated)
+        
+        # Summary
+        print(f"\n🎉 META-HYPOTHESIS GENERATION COMPLETE")
+        print("=" * 80)
+        print(f"Total meta-hypotheses processed: {total_meta_hypotheses}")
+        print(f"Total hypotheses generated: {len(all_hypotheses)}")
+        print(f"Average hypotheses per meta-hypothesis: {len(all_hypotheses)/total_meta_hypotheses:.1f}")
+        
+        # Final export summary
+        if all_hypotheses:
+            print(f"\n💾 Final export summary:")
+            print(f"📊 All results have been incrementally saved to: {excel_filename}")
+            print(f"📁 File location: {os.path.dirname(os.path.abspath(excel_filename))}")
+            
+            # Also create a final comprehensive export
+            final_export_filename = self.export_hypotheses_to_excel()
+            if final_export_filename:
+                print(f"📋 Comprehensive results also exported to: {final_export_filename}")
+            else:
+                print(f"⚠️  Comprehensive export failed, but incremental saves are complete")
+        else:
+            print(f"❌ No hypotheses were successfully generated")
+        
+        return all_hypotheses
+
     def check_api_status(self):
         """Check Gemini API status and provide guidance."""
         print("\n🔍 Checking Gemini API Status...")
@@ -1181,34 +1487,117 @@ class EnhancedRAGQuery:
                 print(f"❌ API error: {e}")
                 print("💡 Try again later or use 'generate_offline'")
 
+    def is_chromadb_ready(self):
+        """Check if ChromaDB is ready and has data for searching."""
+        if not self.use_chromadb or not self.chroma_manager:
+            return False
+        
+        try:
+            stats = self.chroma_manager.get_collection_stats()
+            return stats.get('total_documents', 0) > 0
+        except Exception as e:
+            logger.error(f"Error checking ChromaDB readiness: {e}")
+            return False
+
     def _initialize_hypothesis_tools(self):
-        """Initialize the HypothesisGenerator and HypothesisCritic."""
+        """Initialize the HypothesisGenerator, HypothesisCritic, and MetaHypothesisGenerator."""
         if self.gemini_client:
             self.hypothesis_generator = HypothesisGenerator(model=self.gemini_client)
             def embedding_fn(text):
                 return np.array(self.get_google_embedding(text))
             self.hypothesis_critic = HypothesisCritic(model=self.gemini_client, embedding_fn=embedding_fn)
+            self.meta_hypothesis_generator = MetaHypothesisGenerator(model=self.gemini_client)
             print("✅ Hypothesis tools initialized successfully.")
         else:
             print("⚠️ Gemini client not initialized, skipping hypothesis tools.")
 
     def export_hypotheses_to_excel(self, filename=None):
-        """Export all hypothesis records to Excel format, including all iterations."""
+        """Export hypothesis records to Excel file with grouping by meta-hypothesis."""
         if not self.hypothesis_records:
             print("❌ No hypothesis records to export.")
             return None
+        
         try:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             if filename is None:
-                from datetime import datetime
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                filename = f"hypothesis_export_{timestamp}.xlsx"
+                # Ensure hypothesis_export directory exists
+                export_dir = "hypothesis_export"
+                os.makedirs(export_dir, exist_ok=True)
+                filename = os.path.join(export_dir, f"hypothesis_export_{timestamp}.xlsx")
+            
             import pandas as pd
-            df = pd.DataFrame(self.hypothesis_records)
-            # Auto-detect columns
-            with pd.ExcelWriter(filename, engine='openpyxl') as writer:
-                df.to_excel(writer, sheet_name='Hypotheses', index=False)
-                worksheet = writer.sheets['Hypotheses']
-                for column in worksheet.columns:
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+            
+            # Check if we have meta-hypothesis data
+            has_meta_data = any('Meta_Hypothesis' in record for record in self.hypothesis_records)
+            
+            if has_meta_data:
+                # Group by meta-hypothesis
+                meta_groups = {}
+                for record in self.hypothesis_records:
+                    meta_hypothesis = record.get('Meta_Hypothesis', 'Unknown')
+                    if meta_hypothesis not in meta_groups:
+                        meta_groups[meta_hypothesis] = []
+                    meta_groups[meta_hypothesis].append(record)
+                
+                # Create workbook with multiple sheets
+                workbook = Workbook()
+                workbook.remove(workbook.active)  # Remove default sheet
+                
+                # Define styles
+                header_font = Font(bold=True, color="FFFFFF")
+                header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+                meta_header_font = Font(bold=True, color="FFFFFF", size=12)
+                meta_header_fill = PatternFill(start_color="C5504B", end_color="C5504B", fill_type="solid")
+                border = Border(
+                    left=Side(style='thin'),
+                    right=Side(style='thin'),
+                    top=Side(style='thin'),
+                    bottom=Side(style='thin')
+                )
+                
+                # Create summary sheet
+                summary_sheet = workbook.create_sheet("Summary")
+                summary_sheet['A1'] = "Meta-Hypothesis Summary"
+                summary_sheet['A1'].font = meta_header_font
+                summary_sheet['A1'].fill = meta_header_fill
+                
+                summary_sheet['A3'] = "Meta-Hypothesis"
+                summary_sheet['B3'] = "Hypotheses Generated"
+                summary_sheet['C3'] = "Accepted"
+                summary_sheet['D3'] = "Rejected"
+                summary_sheet['E3'] = "Average Novelty"
+                summary_sheet['F3'] = "Average Accuracy"
+                
+                for col in ['A3', 'B3', 'C3', 'D3', 'E3', 'F3']:
+                    summary_sheet[col].font = header_font
+                    summary_sheet[col].fill = header_fill
+                    summary_sheet[col].border = border
+                
+                row = 4
+                for meta_hypothesis, records in meta_groups.items():
+                    summary_sheet[f'A{row}'] = meta_hypothesis[:100] + "..." if len(meta_hypothesis) > 100 else meta_hypothesis
+                    summary_sheet[f'B{row}'] = len(records)
+                    
+                    accepted_count = sum(1 for r in records if r.get('Verdict') == 'ACCEPTED')
+                    rejected_count = len(records) - accepted_count
+                    summary_sheet[f'C{row}'] = accepted_count
+                    summary_sheet[f'D{row}'] = rejected_count
+                    
+                    avg_novelty = sum(r.get('Novelty', 0) for r in records if r.get('Novelty') is not None) / len(records)
+                    avg_accuracy = sum(r.get('Accuracy', 0) for r in records if r.get('Accuracy') is not None) / len(records)
+                    summary_sheet[f'E{row}'] = round(avg_novelty, 1)
+                    summary_sheet[f'F{row}'] = round(avg_accuracy, 1)
+                    
+                    for col in ['A', 'B', 'C', 'D', 'E', 'F']:
+                        summary_sheet[f'{col}{row}'].border = border
+                    
+                    row += 1
+                
+                # Auto-adjust column widths for summary
+                for column in summary_sheet.columns:
                     max_length = 0
                     column_letter = column[0].column_letter
                     for cell in column:
@@ -1218,11 +1607,153 @@ class EnhancedRAGQuery:
                         except:
                             pass
                     adjusted_width = min(max_length + 2, 50)
-                    worksheet.column_dimensions[column_letter].width = adjusted_width
+                    summary_sheet.column_dimensions[column_letter].width = adjusted_width
+                
+                # Create detailed sheets for each meta-hypothesis
+                for i, (meta_hypothesis, records) in enumerate(meta_groups.items(), 1):
+                    # Create sheet name (Excel has 31 character limit)
+                    sheet_name = f"Meta_{i}"
+                    if len(meta_hypothesis) > 20:
+                        sheet_name += f"_{meta_hypothesis[:20].replace(' ', '_')}"
+                    else:
+                        sheet_name += f"_{meta_hypothesis.replace(' ', '_')}"
+                    
+                    # Clean sheet name for Excel compatibility
+                    sheet_name = "".join(c for c in sheet_name if c.isalnum() or c in ('_', '-'))[:31]
+                    
+                    sheet = workbook.create_sheet(sheet_name)
+                    
+                    # Add meta-hypothesis header
+                    sheet['A1'] = f"Meta-Hypothesis {i}: {meta_hypothesis}"
+                    sheet['A1'].font = meta_header_font
+                    sheet['A1'].fill = meta_header_fill
+                    sheet.merge_cells('A1:H1')
+                    
+                    # Add hypothesis data
+                    df_group = pd.DataFrame(records)
+                    if not df_group.empty:
+                        # Write headers
+                        headers = list(df_group.columns)
+                        for col, header in enumerate(headers, 1):
+                            cell = sheet.cell(row=3, column=col, value=header)
+                            cell.font = header_font
+                            cell.fill = header_fill
+                            cell.border = border
+                        
+                        # Write data
+                        for row_idx, record in enumerate(records, 4):
+                            for col_idx, (key, value) in enumerate(record.items(), 1):
+                                cell = sheet.cell(row=row_idx, column=col_idx, value=value)
+                                cell.border = border
+                        
+                        # Auto-adjust column widths
+                        for column in sheet.columns:
+                            max_length = 0
+                            column_letter = column[0].column_letter
+                            for cell in column:
+                                try:
+                                    if len(str(cell.value)) > max_length:
+                                        max_length = len(str(cell.value))
+                                except:
+                                    pass
+                            adjusted_width = min(max_length + 2, 50)
+                            sheet.column_dimensions[column_letter].width = adjusted_width
+                
+                # Save workbook
+                workbook.save(filename)
+                
+            else:
+                # Fallback to simple export for non-meta-hypothesis data
+                df = pd.DataFrame(self.hypothesis_records)
+                with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+                    df.to_excel(writer, sheet_name='Hypotheses', index=False)
+                    worksheet = writer.sheets['Hypotheses']
+                    for column in worksheet.columns:
+                        max_length = 0
+                        column_letter = column[0].column_letter
+                        for cell in column:
+                            try:
+                                if len(str(cell.value)) > max_length:
+                                    max_length = len(str(cell.value))
+                            except:
+                                pass
+                        adjusted_width = min(max_length + 2, 50)
+                        worksheet.column_dimensions[column_letter].width = adjusted_width
+            
             print(f"✅ Successfully exported {len(self.hypothesis_records)} hypothesis records to: {filename}")
+            print(f"📁 File saved in: {os.path.dirname(os.path.abspath(filename))}")
+            if has_meta_data:
+                print(f"📊 Organized into {len(meta_groups)} meta-hypothesis groups with summary sheet")
             return filename
         except Exception as e:
             print(f"❌ Failed to export hypotheses to Excel: {e}")
+            return None
+    
+    def save_hypothesis_record_incrementally(self, record, filename=None):
+        """Save a single hypothesis record to Excel file incrementally."""
+        if filename is None:
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # Ensure hypothesis_export directory exists
+            export_dir = "hypothesis_export"
+            os.makedirs(export_dir, exist_ok=True)
+            filename = os.path.join(export_dir, f"hypothesis_export_{timestamp}.xlsx")
+        
+        try:
+            import pandas as pd
+            from openpyxl import load_workbook
+            
+            # Check if file exists
+            if os.path.exists(filename):
+                # Load existing workbook
+                workbook = load_workbook(filename)
+                
+                # Get or create the Hypotheses sheet
+                if 'Hypotheses' in workbook.sheetnames:
+                    worksheet = workbook['Hypotheses']
+                    # Find the next empty row
+                    next_row = worksheet.max_row + 1
+                else:
+                    worksheet = workbook.create_sheet('Hypotheses')
+                    next_row = 1
+                    # Add headers for new sheet
+                    headers = list(record.keys())
+                    for col, header in enumerate(headers, 1):
+                        worksheet.cell(row=1, column=col, value=header)
+                    next_row = 2
+                
+                # Add the record data
+                for col, value in enumerate(record.values(), 1):
+                    worksheet.cell(row=next_row, column=col, value=value)
+                
+                # Save the workbook
+                workbook.save(filename)
+                
+            else:
+                # Create new file
+                df_row = pd.DataFrame([record])
+                with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+                    df_row.to_excel(writer, sheet_name='Hypotheses', index=False)
+                    worksheet = writer.sheets['Hypotheses']
+                    # Auto-adjust column widths
+                    for column in worksheet.columns:
+                        max_length = 0
+                        column_letter = column[0].column_letter
+                        for cell in column:
+                            try:
+                                if len(str(cell.value)) > max_length:
+                                    max_length = len(str(cell.value))
+                            except:
+                                pass
+                        adjusted_width = min(max_length + 2, 50)
+                        worksheet.column_dimensions[column_letter].width = adjusted_width
+            
+            print(f"💾 Saved hypothesis record to: {filename}")
+            print(f"📁 File saved in: {os.path.dirname(os.path.abspath(filename))}")
+            return filename
+            
+        except Exception as e:
+            print(f"❌ Failed to save hypothesis record incrementally: {e}")
             return None
 
     def clear_hypothesis_records(self):
@@ -1251,11 +1782,16 @@ class EnhancedRAGQuery:
         print(f"   - 'add <query>': Search, batch, and generate hypotheses from all relevant results (e.g., 'add cancer')")
         print(f"   - 'add <N> <query>': Search, batch, and generate hypotheses from up to N results (e.g., 'add 2000 cancer')")
         print(f"   - 'add all <query>': Search, batch, and generate hypotheses from ALL found results (e.g., 'add all cancer')")
+        print(f"   - 'meta <query>': Use meta-hypothesis generator to create 5 diverse research directions, then generate hypotheses for each (e.g., 'meta UBR-5 in cancer')")
+        print(f"   - 'meta <chunks> <query>': Advanced usage - specify number of chunks per meta-hypothesis (e.g., 'meta 2000 UBR-5 in cancer')")
         print(f"   - 'clear': Clear current package")
         print(f"   - 'export': Export hypothesis records to Excel")
         print(f"   - 'records': Show current hypothesis records")
         print(f"   - 'clear_records': Clear hypothesis records")
         print(f"   💡 Note: Large queries may take longer and use more API calls. Use 'clear' if you get errors.")
+        print(f"   🆕 Dynamic chunk selection: Each hypothesis will use new chunks from the database!")
+        print(f"   🆕 Meta-hypothesis generator: Creates diverse research directions for comprehensive exploration!")
+        print(f"   📚 Default: 1500 chunks per hypothesis generation for richer context!")
         print()
 
     def interactive_search(self):
@@ -1275,6 +1811,52 @@ class EnhancedRAGQuery:
                 self.show_hypothesis_records()
             elif query.lower() == 'clear_records':
                 self.clear_hypothesis_records()
+            elif query.lower().startswith('meta '):
+                try:
+                    parts = query.split(' ', 1)
+                    if len(parts) < 2:
+                        print("❌ Usage: meta <query> (e.g., 'meta UBR-5 in cancer')")
+                        print("   Advanced: meta <chunks> <query> (e.g., 'meta 2000 UBR-5 in cancer' for 2000 chunks per meta-hypothesis)")
+                        continue
+                    
+                    # Check if first part is a number (chunks specification)
+                    query_parts = parts[1].split(' ', 1)
+                    if len(query_parts) > 1 and query_parts[0].isdigit():
+                        chunks_per_meta = int(query_parts[0])
+                        # Validate chunks number
+                        if chunks_per_meta < 5:
+                            print(f"❌ Too few chunks ({chunks_per_meta}). Minimum is 5 chunks per meta-hypothesis.")
+                            continue
+                        elif chunks_per_meta > 5000:
+                            print(f"⚠️  Very large number of chunks ({chunks_per_meta}). This may cause API errors or timeouts.")
+                            response = input("Continue anyway? (y/n): ").lower()
+                            if response != 'y':
+                                continue
+                        meta_query = query_parts[1]
+                        print(f"\n🧠 Meta-hypothesis generation for: '{meta_query}'")
+                        print(f"📚 Using {chunks_per_meta} chunks per meta-hypothesis")
+                    else:
+                        chunks_per_meta = 1500  # default
+                        meta_query = parts[1]
+                        print(f"\n🧠 Meta-hypothesis generation for: '{meta_query}'")
+                        print(f"📚 Using default {chunks_per_meta} chunks per meta-hypothesis")
+                    
+                    print("This will generate 5 diverse research directions, then create hypotheses for each.")
+                    print("This process may take several minutes and use significant API calls.")
+                    response = input("Continue? (y/n): ").lower()
+                    if response == 'y':
+                        try:
+                            results = self.generate_hypotheses_with_meta_generator(meta_query, n_per_meta=3, chunks_per_meta=chunks_per_meta)
+                            if results:
+                                print(f"\n✅ Meta-hypothesis generation complete! Generated {len(results)} hypotheses across 5 research directions.")
+                            else:
+                                print("❌ Meta-hypothesis generation failed.")
+                        except Exception as e:
+                            print(f"❌ Error during meta-hypothesis generation: {e}")
+                    else:
+                        print("Meta-hypothesis generation cancelled.")
+                except Exception as e:
+                    print(f"❌ Error processing meta command: {e}")
             elif query.lower().startswith('add '):
                 try:
                     parts = query.split(' ', 2)
@@ -1365,6 +1947,18 @@ class EnhancedRAGQuery:
                             attempts += 1
                             print(f"\n🧠 Generating hypothesis attempt {attempts}...")
                             
+                            # Select new chunks from ChromaDB for this hypothesis generation
+                            if self.use_chromadb and self.chroma_manager and self.initial_add_quantity:
+                                print(f"🔄 Selecting new chunks for hypothesis attempt {attempts}...")
+                                dynamic_chunks = self.select_dynamic_chunks_for_generation(search_query)
+                                if dynamic_chunks:
+                                    all_chunks = dynamic_chunks
+                                    print(f"📚 Using {len(all_chunks)} dynamically selected chunks for generation")
+                                else:
+                                    print(f"⚠️  Failed to select dynamic chunks, using original chunks")
+                            else:
+                                print(f"📚 Using original chunks for generation (no dynamic selection available)")
+                            
                             # Start timer for this hypothesis
                             self.hypothesis_timer.start()
                             print(f"⏱️  Starting 5-minute timer for hypothesis attempt {attempts}...")
@@ -1432,9 +2026,9 @@ class EnhancedRAGQuery:
                             novelty = critique_result.get('novelty', 0)
                             accuracy = critique_result.get('accuracy', 0)
                             relevancy = critique_result.get('relevancy', 0)
-                            verdict = self.automated_verdict(accuracy, novelty, relevancy)
+                            verdict = self.automated_verdict(accuracy, novelty, relevancy, accuracy_threshold, novelty_threshold, relevancy_threshold)
                             remaining_time = self.hypothesis_timer.get_remaining_time()
-                            print(f"   Novelty: {novelty}, Accuracy: {accuracy}, Relevancy: {relevancy}, Automated Verdict: {verdict}")
+                            print(f"   Novelty: {novelty}/{novelty_threshold}, Accuracy: {accuracy}/{accuracy_threshold}, Relevancy: {relevancy}/{relevancy_threshold}, Automated Verdict: {verdict}")
                             print(f"   ⏱️  Time remaining: {remaining_time:.1f}s")
                             
                             # Extract citations from results metadata
@@ -1478,7 +2072,7 @@ class EnhancedRAGQuery:
                                 'Citations': formatted_citations
                             })
                             
-                            if novelty is not None and accuracy is not None and novelty >= novelty_threshold and accuracy >= accuracy_threshold and relevancy >= relevancy_threshold:
+                            if verdict == 'ACCEPTED':
                                 accepted_hypotheses.append({
                                     "hypothesis": hypothesis,
                                     "critique": critique_result,
@@ -1486,7 +2080,7 @@ class EnhancedRAGQuery:
                                 })
                                 print(f"✅ Hypothesis accepted! ({len(accepted_hypotheses)}/5)")
                             else:
-                                print(f"❌ Hypothesis rejected (novelty or accuracy below threshold: Novelty < {novelty_threshold} or Accuracy < {accuracy_threshold} or Relevancy < {relevancy_threshold})")
+                                print(f"❌ Hypothesis rejected (verdict: {verdict})")
                         
                         if not accepted_hypotheses:
                             print("❌ No hypotheses were successfully critiqued.")
@@ -1503,7 +2097,7 @@ class EnhancedRAGQuery:
                             print(f"   Novelty: {critique.get('novelty', 'N/A')}")
                             print(f"   Accuracy: {critique.get('accuracy', 'N/A')}")
                             print(f"   Relevancy: {critique.get('relevancy', 'N/A')}")
-                            print(f"   Automated Verdict: {self.automated_verdict(critique.get('accuracy', 0), critique.get('novelty', 0), critique.get('relevancy', 0))} ({self.automated_verdict(critique.get('accuracy', 0), critique.get('novelty', 0), critique.get('relevancy', 0), accuracy_threshold=accuracy_threshold, novelty_threshold=novelty_threshold, relevancy_threshold=relevancy_threshold)})")
+                            print(f"   Automated Verdict: {self.automated_verdict(critique.get('accuracy', 0), critique.get('novelty', 0), critique.get('relevancy', 0), accuracy_threshold, novelty_threshold, relevancy_threshold)}")
                             print(f"   Critique: {critique.get('critique', 'N/A')}")
                             print("-" * 80)
                         
@@ -1512,6 +2106,7 @@ class EnhancedRAGQuery:
                         export_filename = self.export_hypotheses_to_excel()
                         if export_filename:
                             print(f"📊 Results exported to: {export_filename}")
+                            print(f"📁 File saved in: {os.path.dirname(os.path.abspath(export_filename))}")
                         
                         # Enter discussion loop
                         print("\n💬 You can now discuss these hypotheses with the AI. Type the number of a hypothesis (1-5) to select it, or 'exit' to leave discussion mode.")
@@ -1581,7 +2176,7 @@ class EnhancedRAGQuery:
         
         # Run hypothesis generation
         print(f"\n🔍 Searching for relevant context...")
-        context_chunks = self.retrieve_relevant_chunks(query, top_k=20)
+        context_chunks = self.retrieve_relevant_chunks(query, top_k=1500)
         if not context_chunks:
             print("❌ No relevant context found.")
             return None
@@ -1599,6 +2194,18 @@ class EnhancedRAGQuery:
             attempts += 1
             print(f"\n🔄 Hypothesis Attempt {attempts}/{max_attempts}")
             print("-" * 60)
+            
+            # Select new chunks from ChromaDB for this hypothesis generation
+            if self.use_chromadb and self.chroma_manager and self.initial_add_quantity:
+                print(f"🔄 Selecting new chunks for hypothesis attempt {attempts}...")
+                dynamic_chunks = self.select_dynamic_chunks_for_generation(query)
+                if dynamic_chunks:
+                    context_chunks = dynamic_chunks
+                    print(f"📚 Using {len(context_chunks)} dynamically selected chunks for generation")
+                else:
+                    print(f"⚠️  Failed to select dynamic chunks, using original chunks")
+            else:
+                print(f"📚 Using original chunks for generation (no dynamic selection available)")
             
             # Start timer
             self.hypothesis_timer.start()
@@ -1658,7 +2265,7 @@ class EnhancedRAGQuery:
                 novelty = critique_result.get('novelty', 0)
                 accuracy = critique_result.get('accuracy', 0)
                 relevancy = critique_result.get('relevancy', 0)
-                verdict = self.automated_verdict(accuracy, novelty, relevancy)
+                verdict = self.automated_verdict(accuracy, novelty, relevancy, accuracy_threshold=80, novelty_threshold=85, relevancy_threshold=50)
                 remaining_time = self.hypothesis_timer.get_remaining_time()
                 
                 print(f"📊 Scores: Accuracy={accuracy}, Novelty={novelty}, Relevancy={relevancy}")
@@ -1720,6 +2327,7 @@ class EnhancedRAGQuery:
         
         if export_filename:
             print(f"✅ Results exported to: {export_filename}")
+            print(f"📁 File saved in: {os.path.dirname(os.path.abspath(export_filename))}")
         else:
             print(f"❌ Export failed")
         
@@ -1752,7 +2360,10 @@ class EnhancedRAGQuery:
         # Prepare Excel file
         if filename is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"hypothesis_export_{timestamp}.xlsx"
+            # Ensure hypothesis_export directory exists
+            export_dir = "hypothesis_export"
+            os.makedirs(export_dir, exist_ok=True)
+            filename = os.path.join(export_dir, f"hypothesis_export_{timestamp}.xlsx")
         # Write header row at the start, with empty separator and verifier columns
         columns = [
             'HypothesisNumber', 'Iteration', 'Status', 'Hypothesis', 'Novelty', 'Accuracy', 'Critique', 'TimeLeft',
@@ -1762,9 +2373,23 @@ class EnhancedRAGQuery:
         pd.DataFrame(columns=columns).to_excel(filename, index=False)
         for hyp_idx in range(n):
             print(f"\nGenerating hypothesis {hyp_idx+1}/{n}\n")
+            
+            # Select new chunks from ChromaDB for this hypothesis generation
+            if self.use_chromadb and self.chroma_manager and self.initial_add_quantity:
+                print(f"🔄 Selecting new chunks for hypothesis {hyp_idx+1}...")
+                dynamic_chunks = self.select_dynamic_chunks_for_generation("package query")
+                if dynamic_chunks:
+                    context_texts = dynamic_chunks
+                    print(f"📚 Using {len(context_texts)} dynamically selected chunks for generation")
+                else:
+                    print(f"⚠️  Failed to select dynamic chunks, using original chunks")
+                    context_texts = [chunk for chunk in package_chunks]
+            else:
+                print(f"📚 Using original chunks for generation (no dynamic selection available)")
+                context_texts = [chunk for chunk in package_chunks]
+            
             self.hypothesis_timer.start()
             time_left = self.hypothesis_timer.get_remaining_time()
-            context_texts = [chunk for chunk in package_chunks]
             hypothesis = self.hypothesis_generator.generate(context_texts, n=1)[0]
             accepted = False
             iteration = 0
@@ -1775,14 +2400,14 @@ class EnhancedRAGQuery:
                 accuracy = critique_result.get('accuracy', 0)
                 relevancy = critique_result.get('relevancy', 0)
                 time_left = self.hypothesis_timer.get_remaining_time()
-                status = "ACCEPTED" if self.automated_verdict(accuracy, novelty, relevancy) == "ACCEPTED" else "REJECTED"
-                print(f"Iteration {iteration}: {status} | Novelty: {novelty} | Accuracy: {accuracy} | Relevancy: {relevancy} | Time left: {int(time_left)}s")
+                verdict = self.automated_verdict(accuracy, novelty, relevancy, accuracy_threshold=80, novelty_threshold=85, relevancy_threshold=50)
+                print(f"Iteration {iteration}: {verdict} | Novelty: {novelty}/85 | Accuracy: {accuracy}/80 | Relevancy: {relevancy}/50 | Time left: {int(time_left)}s")
                 print(f"Hypothesis: {hypothesis}")
                 # Save this iteration to records
                 record = {
                     'HypothesisNumber': hyp_idx+1,
                     'Iteration': iteration,
-                    'Status': status,
+                    'Status': verdict,
                     'Hypothesis': hypothesis,
                     'Novelty': novelty,
                     'Accuracy': accuracy,
@@ -1801,12 +2426,12 @@ class EnhancedRAGQuery:
                     writer.sheets = {ws.title: ws for ws in writer.book.worksheets}
                     startrow = writer.book['Hypotheses'].max_row
                     df_row.to_excel(writer, sheet_name='Hypotheses', index=False, header=False, startrow=startrow)
-                if self.automated_verdict(accuracy, novelty, relevancy) == "ACCEPTED":
-                    print(f"✅ Hypothesis accepted! (Novelty: {novelty} >= {novelty_threshold}, Accuracy: {accuracy} >= {accuracy_threshold}, Relevancy: {relevancy} >= {relevancy_threshold})")
+                if verdict == "ACCEPTED":
+                    print(f"✅ Hypothesis accepted! (verdict: {verdict})")
                     accepted = True
                     break
                 else:
-                    print(f"❌ Hypothesis rejected (Novelty: {novelty} < {novelty_threshold} or Accuracy: {accuracy} < {accuracy_threshold} or Relevancy: {relevancy} < {relevancy_threshold})")
+                    print(f"❌ Hypothesis rejected (verdict: {verdict})")
                 if self.hypothesis_timer.check_expired():
                     print(f"⏰ Time limit reached for hypothesis {hyp_idx+1}. Moving to next hypothesis.")
                     break
@@ -1815,30 +2440,16 @@ class EnhancedRAGQuery:
                 if new_hypothesis:
                     hypothesis = new_hypothesis[0]
         print(f"\n✅ All iterations and results have been saved to: {filename}")
+        print(f"📁 File saved in: {os.path.dirname(os.path.abspath(filename))}")
         return self.hypothesis_records
 
 def main():
     """Main function to run the enhanced RAG query system."""
     print("=== Enhanced RAG System Startup ===")
-    print("Choose startup mode:")
-    print("1. Fast startup (skip data loading, load on-demand)")
-    print("2. Full startup (load all data at startup - may be slow)")
+    print("🚀 Starting Enhanced RAG System with ChromaDB...")
     
-    while True:
-        choice = input("Enter choice (1 or 2): ").strip()
-        if choice == "1":
-            load_at_startup = False
-            print("🚀 Starting in fast mode...")
-            break
-        elif choice == "2":
-            load_at_startup = True
-            print("📚 Starting in full mode...")
-            break
-        else:
-            print("❌ Please enter 1 or 2")
-    
-    # Initialize with ChromaDB enabled
-    rag_system = EnhancedRAGQuery(use_chromadb=True, load_data_at_startup=load_at_startup)
+    # Initialize with ChromaDB enabled and fast startup
+    rag_system = EnhancedRAGQuery(use_chromadb=True, load_data_at_startup=False)
     
     # Show new features
     print("\n" + "=" * 80)

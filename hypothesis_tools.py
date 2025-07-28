@@ -18,6 +18,87 @@ def is_ubr5_related(text: str) -> bool:
             return True
     return False
 
+class MetaHypothesisGenerator:
+    """
+    Meta-hypothesis generator that takes a user prompt and creates 5 different prompts
+    to send to the actual hypothesis generator for diverse hypothesis generation.
+    """
+    def __init__(self, model=None):
+        self.model = model  # Gemini client
+
+    def build_meta_prompt(self, user_prompt: str) -> str:
+        """Build prompt for generating 5 different meta-hypotheses from user input."""
+        prompt = f"""
+# Meta-Hypothesis Generator Prompt
+
+## Role
+You are an expert research strategist specializing in UBR-5 protein research and Dr. Xiaojing Ma's laboratory at Weill Cornell Medicine. Your task is to take a user's research query and break it down into 5 distinct, complementary research directions.
+
+## Task
+Given the user's research query, generate exactly 5 different meta-hypotheses that represent diverse angles and approaches to the same research area. Each meta-hypothesis should be:
+- Focused on a specific aspect or mechanism
+- Complementary to the others (not redundant)
+- Feasible for Dr. Ma's lab to investigate
+- Novel and scientifically interesting
+
+## Guidelines
+- Focus on different molecular mechanisms, cellular processes, or therapeutic approaches
+- Consider different experimental methodologies
+- Vary the scope from molecular to cellular to organismal levels
+- Ensure each direction is distinct but related to the core topic
+
+## Output Format
+Provide exactly 5 meta-hypotheses, numbered 1-5. Each should be a clear, specific research direction.
+
+User Query: {user_prompt}
+
+Meta-Hypotheses:
+1.
+"""
+        return prompt
+
+    def generate_meta_hypotheses(self, user_prompt: str) -> List[str]:
+        """Generate 5 meta-hypotheses from the user's prompt."""
+        if not self.model:
+            # Fallback meta-hypotheses
+            return [
+                f"Investigate the role of UBR-5 in {user_prompt} at the molecular level",
+                f"Examine UBR-5's impact on {user_prompt} in cellular processes",
+                f"Study UBR-5-mediated regulation of {user_prompt} in disease models",
+                f"Explore therapeutic targeting of UBR-5 for {user_prompt}",
+                f"Analyze UBR-5's interaction with {user_prompt} in immune responses"
+            ]
+        
+        try:
+            prompt = self.build_meta_prompt(user_prompt)
+            response = self.model.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt
+            )
+            text = response.text
+            return self._parse_meta_hypotheses(text)
+        except Exception as e:
+            print(f"[MetaHypothesisGenerator] Error generating meta-hypotheses: {e}")
+            # Return fallback meta-hypotheses
+            return [
+                f"Investigate the role of UBR-5 in {user_prompt} at the molecular level",
+                f"Examine UBR-5's impact on {user_prompt} in cellular processes", 
+                f"Study UBR-5-mediated regulation of {user_prompt} in disease models",
+                f"Explore therapeutic targeting of UBR-5 for {user_prompt}",
+                f"Analyze UBR-5's interaction with {user_prompt} in immune responses"
+            ]
+
+    def _parse_meta_hypotheses(self, text: str) -> List[str]:
+        """Parse numbered meta-hypotheses from LLM output."""
+        pattern = re.compile(r"\n?\s*(\d+)\.\s+(.*?)(?=\n\s*\d+\.|$)", re.DOTALL)
+        matches = pattern.findall(text)
+        if matches:
+            # Return only the meta-hypothesis text, up to 5
+            return [m[1].strip() for m in matches[:5]]
+        # Fallback: split by lines
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        return lines[:5]
+
 class HypothesisGenerator:
     """
     Generates scientific hypotheses tailored to UBR-5 and Dr. Xiaojing Ma's lab using provided literature context.
@@ -53,10 +134,10 @@ Develop detailed research proposal for the hypothesis, including:
 - Expected outcomes and potential limitations
 
 ## Communication Style
-Maintain a highly analytical, critical, and scientifically rigorous approach.
+- Maintain a highly analytical, critical, and scientifically rigorous approach.
+- Please limit your output to 1000 words.
 
-Please limit your output to 1000 characters.
-
+Please generate a hypothesis and a research plan.
 ---
 
 Literature Context:
@@ -105,6 +186,7 @@ class HypothesisCritic:
         context = "\n\n".join(context_chunks)
         prompt = f"""
 You are an expert scientific reviewer for Dr. Xiaojing Ma's lab, specializing in UBR-5 and related pathways. Critically evaluate the following hypothesis in light of the provided literature. Discuss its novelty, plausibility, and potential impact. Point out any supporting or conflicting evidence from the context.
+Be extremely critical and professional.
 
 After your critique, provide:
 - A novelty score (0-100, where 100 is completely novel)

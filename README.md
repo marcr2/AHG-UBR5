@@ -15,6 +15,7 @@ The final application will serve as a powerful tool for researchers, suggesting 
 
 * **Automated Literature Acquisition:** Utilizes Python libraries (e.g., `paperscraper`) to systematically search and download relevant academic articles from various scientific databases.
 * **Targeted Data Corpus:** Creates a specialized, up-to-date knowledge base exclusively focused on the Ubr5 protein.
+* **Persistent Vector Database:** ChromaDB stores embeddings locally, eliminating the need to reload data every time you start the system.
 * **LLM-Powered Analysis:** Integrates a state-of-the-art LLM to "read" and synthesize the collected scientific literature.
 * **Hypothesis Generation:** The primary output is the generation of scientifically plausible hypotheses, complete with underlying citations and reasoning from the source texts.
 * **Modular Design:** The scraper and the AI application are developed as distinct modules, allowing for independent testing, validation, and future expansion.
@@ -53,10 +54,32 @@ This phase involves designing and building the proof-of-concept AI application. 
 * **Language:** Python 3.x
 * **Web Scraping/Data Acquisition:** `paperscraper`, `Beautiful Soup`, `requests`, `Scrapy` (as alternatives)
 * **Data Handling:** `Pandas`, `JSON`
-* **AI/LLM Integration:** `LangChain`, `Hugging Face Transformers`, `OpenAI API`, `Anthropic API`
+* **Vector Database:** `ChromaDB` (persistent local storage)
+* **AI/LLM Integration:** `LangChain`, `Hugging Face Transformers`, `OpenAI API`, `Anthropic API`, `Google Gemini API`
 * **Environment Management:** `Docker` (optional, for reproducibility)
 
 ---
+
+## Persistent ChromaDB Storage
+
+The system uses ChromaDB as a persistent vector database that stores embeddings locally in the `./chroma_db/` directory. This provides several key benefits:
+
+* **No Data Reloading:** Once embeddings are loaded into ChromaDB, they persist between sessions
+* **Fast Startup:** The Enhanced RAG System can start immediately without reloading large embedding files
+* **Efficient Memory Usage:** Data is stored on disk and accessed as needed, rather than loaded entirely into memory
+* **Scalability:** Can handle large datasets without memory constraints
+
+### Usage Workflow
+
+1. **First Time Setup:** Run `python master_processor.py` and choose option 4 to load data into ChromaDB
+2. **Subsequent Sessions:** Start the Enhanced RAG System directly - it will use the persisted ChromaDB data
+3. **Status Check:** Use option 8 in the master processor to check ChromaDB status and data availability
+
+### Data Location
+
+* ChromaDB data is stored in: `./chroma_db/`
+* Embedding files are stored in: `./pubmed_embeddings.json` and `./xrvix_embeddings/`
+* The system automatically detects if ChromaDB has data and skips reloading
 
 ## Project Goals & Future Directions
 
