@@ -123,6 +123,9 @@ class EnhancedRAGQuery:
         self.initial_add_quantity = None
         self.hypothesis_timer = HypothesisTimer(timeout_minutes=5)  # 5-minute timer
         
+        # Track used papers to avoid reusing them in dynamic chunk selection
+        self.used_papers = set()  # Set of paper identifiers (DOI or title) that have been used
+        
         # Package system for collecting search results
         self.current_package = {
             "chunks": [],
@@ -608,7 +611,7 @@ class EnhancedRAGQuery:
         return results
 
     def select_dynamic_chunks_for_generation(self, query, num_chunks=None):
-        """Select new chunks from ChromaDB for hypothesis generation, using the initial add quantity."""
+        """Select new chunks from ChromaDB for hypothesis generation, ensuring diversity across sources (pubmed, biorxiv, medrxiv)."""
         if not self.use_chromadb or not self.chroma_manager:
             print("❌ ChromaDB not available for dynamic chunk selection.")
             return None
@@ -630,23 +633,215 @@ class EnhancedRAGQuery:
                 search_query = query
             
             print(f"🔍 Searching ChromaDB for '{search_query}' to select {num_chunks} new chunks...")
+            print(f"🎯 Ensuring diversity across sources: pubmed, biorxiv, medrxiv")
             
-            # Use hybrid search to get diverse results
-            results = self.search_hybrid(search_query, top_k=num_chunks, filter_dict=None)
+            # Search for more chunks than needed to account for filtering out used papers
+            search_k = min(num_chunks * 3, 5000)  # Search up to 3x the needed amount, max 5000
+            results = self.search_hybrid(search_query, top_k=search_k, filter_dict=None)
             
             if not results:
                 print("❌ No new chunks found in ChromaDB.")
                 return None
             
-            # Extract just the chunk text for generation
-            new_chunks = [result['chunk'] for result in results]
-            print(f"✅ Selected {len(new_chunks)} new chunks from ChromaDB for this hypothesis generation")
+            # Organize results by source for balanced selection
+            source_chunks = {
+                'pubmed': [],
+                'biorxiv': [],
+                'medrxiv': []
+            }
+            
+            # Categorize results by source
+            for result in results:
+                metadata = result.get('metadata', {})
+                source = metadata.get('source', '').lower()
+                source_name = metadata.get('source_name', '').lower()
+                
+                # Determine the source
+                if 'pubmed' in source or 'pubmed' in source_name:
+                    source_key = 'pubmed'
+                elif 'biorxiv' in source or 'biorxiv' in source_name:
+                    source_key = 'biorxiv'
+                elif 'medrxiv' in source or 'medrxiv' in source_name:
+                    source_key = 'medrxiv'
+                else:
+                    # Default to pubmed if source is unclear
+                    source_key = 'pubmed'
+                
+                source_chunks[source_key].append(result)
+            
+            # Calculate target chunks per source (balanced distribution)
+            chunks_per_source = max(1, num_chunks // 3)  # At least 1 chunk per source
+            remaining_chunks = num_chunks % 3
+            
+            print(f"📊 Source distribution target: ~{chunks_per_source} chunks per source")
+            
+            # Filter out chunks from already used papers and select balanced chunks
+            new_chunks = []
+            used_papers_in_this_selection = set()
+            source_counts = {'pubmed': 0, 'biorxiv': 0, 'medrxiv': 0}
+            
+            # Select chunks from each source, avoiding used papers
+            for source_key in ['pubmed', 'biorxiv', 'medrxiv']:
+                source_target = chunks_per_source + (1 if remaining_chunks > 0 else 0)
+                remaining_chunks = max(0, remaining_chunks - 1)
+                
+                source_results = source_chunks[source_key]
+                source_selected = 0
+                
+                for result in source_results:
+                    if source_selected >= source_target:
+                        break
+                        
+                    metadata = result.get('metadata', {})
+                    paper_id = self._get_paper_identifier(metadata)
+                    
+                    # Skip if this paper has been used before
+                    if paper_id in self.used_papers:
+                        continue
+                    
+                    # Add to new chunks and mark as used
+                    new_chunks.append(result['chunk'])
+                    used_papers_in_this_selection.add(paper_id)
+                    source_counts[source_key] += 1
+                    source_selected += 1
+            
+            # If we don't have enough chunks from balanced selection, fill with any available chunks
+            if len(new_chunks) < num_chunks:
+                print(f"⚠️  Balanced selection only found {len(new_chunks)} chunks, filling with additional chunks...")
+                
+                # Collect all remaining unused chunks
+                remaining_chunks = []
+                for result in results:
+                    metadata = result.get('metadata', {})
+                    paper_id = self._get_paper_identifier(metadata)
+                    
+                    if paper_id not in self.used_papers and paper_id not in used_papers_in_this_selection:
+                        remaining_chunks.append(result)
+                
+                # Add remaining chunks until we reach the target
+                for result in remaining_chunks:
+                    if len(new_chunks) >= num_chunks:
+                        break
+                        
+                    metadata = result.get('metadata', {})
+                    paper_id = self._get_paper_identifier(metadata)
+                    
+                    new_chunks.append(result['chunk'])
+                    used_papers_in_this_selection.add(paper_id)
+                    
+                    # Track source for remaining chunks
+                    source = metadata.get('source', '').lower()
+                    source_name = metadata.get('source_name', '').lower()
+                    if 'biorxiv' in source or 'biorxiv' in source_name:
+                        source_counts['biorxiv'] += 1
+                    elif 'medrxiv' in source or 'medrxiv' in source_name:
+                        source_counts['medrxiv'] += 1
+                    else:
+                        source_counts['pubmed'] += 1
+            
+            # Add the newly used papers to the tracking set
+            self.used_papers.update(used_papers_in_this_selection)
+            
+            print(f"✅ Selected {len(new_chunks)} new chunks from {len(used_papers_in_this_selection)} previously unused papers")
+            print(f"📊 Source distribution: pubmed={source_counts['pubmed']}, biorxiv={source_counts['biorxiv']}, medrxiv={source_counts['medrxiv']}")
+            print(f"📊 Total papers used so far: {len(self.used_papers)}")
+            
+            if len(new_chunks) < num_chunks:
+                print(f"⚠️  Only found {len(new_chunks)} new chunks (requested {num_chunks})")
+                if len(self.used_papers) > 100:  # Arbitrary threshold
+                    print("💡 Consider resetting used papers list with 'reset_papers' command")
             
             return new_chunks
             
         except Exception as e:
             print(f"❌ Error selecting dynamic chunks: {e}")
             return None
+    
+    def _get_paper_identifier(self, metadata):
+        """Extract a unique identifier for a paper from its metadata."""
+        # Try DOI first, then title, then source + title
+        doi = metadata.get('doi', '')
+        title = metadata.get('title', '')
+        source = metadata.get('source', '')
+        
+        if doi and doi != 'No DOI':
+            return f"doi:{doi}"
+        elif title:
+            # Use a normalized version of the title (lowercase, no extra spaces)
+            normalized_title = ' '.join(title.lower().split())
+            return f"title:{normalized_title}"
+        else:
+            # Fallback to source + title if available
+            if source and title:
+                normalized_title = ' '.join(title.lower().split())
+                return f"source_title:{source}_{normalized_title}"
+            else:
+                # Last resort: use a hash of the metadata
+                import hashlib
+                metadata_str = str(sorted(metadata.items()))
+                return f"hash:{hashlib.md5(metadata_str.encode()).hexdigest()[:8]}"
+    
+    def reset_used_papers(self):
+        """Reset the list of used papers to allow reusing them."""
+        previous_count = len(self.used_papers)
+        self.used_papers.clear()
+        print(f"🔄 Reset used papers list. Previously used {previous_count} papers.")
+        print("💡 You can now reuse papers that were previously selected.")
+    
+    def show_used_papers_status(self):
+        """Show the current status of used papers tracking with source breakdown."""
+        print(f"📊 Used Papers Status:")
+        print(f"   Total papers used: {len(self.used_papers)}")
+        
+        # Analyze source distribution of used papers
+        source_counts = {'pubmed': 0, 'biorxiv': 0, 'medrxiv': 0, 'unknown': 0}
+        
+        for paper_id in self.used_papers:
+            if paper_id.startswith('doi:'):
+                # For DOI-based IDs, we can't easily determine source without metadata
+                source_counts['unknown'] += 1
+            elif paper_id.startswith('title:'):
+                # For title-based IDs, we can't easily determine source without metadata
+                source_counts['unknown'] += 1
+            elif paper_id.startswith('source_title:'):
+                # Extract source from source_title format
+                if 'biorxiv_' in paper_id:
+                    source_counts['biorxiv'] += 1
+                elif 'medrxiv_' in paper_id:
+                    source_counts['medrxiv'] += 1
+                elif 'pubmed_' in paper_id:
+                    source_counts['pubmed'] += 1
+                else:
+                    source_counts['unknown'] += 1
+            else:
+                source_counts['unknown'] += 1
+        
+        print(f"   Source breakdown:")
+        print(f"     PubMed: {source_counts['pubmed']} papers")
+        print(f"     BioRxiv: {source_counts['biorxiv']} papers")
+        print(f"     MedRxiv: {source_counts['medrxiv']} papers")
+        if source_counts['unknown'] > 0:
+            print(f"     Unknown: {source_counts['unknown']} papers")
+        
+        if self.used_papers:
+            # Show a sample of used papers
+            sample_size = min(5, len(self.used_papers))
+            sample_papers = list(self.used_papers)[:sample_size]
+            print(f"   Sample of used papers:")
+            for paper_id in sample_papers:
+                if paper_id.startswith('doi:'):
+                    print(f"     - DOI: {paper_id[4:]}")
+                elif paper_id.startswith('title:'):
+                    print(f"     - Title: {paper_id[6:][:50]}...")
+                else:
+                    print(f"     - {paper_id[:50]}...")
+            
+            if len(self.used_papers) > sample_size:
+                print(f"     ... and {len(self.used_papers) - sample_size} more")
+        else:
+            print("   No papers have been used yet.")
+        
+        print(f"   💡 Use 'reset_papers' to clear the used papers list and allow reusing papers")
 
     @staticmethod
     def automated_verdict(accuracy, novelty, relevancy, accuracy_threshold=80, novelty_threshold=85, relevancy_threshold=50):
@@ -837,23 +1032,54 @@ class EnhancedRAGQuery:
         }
         # Reset the initial add quantity when clearing package
         self.initial_add_quantity = None
+        # Reset used papers tracking when clearing package
+        previous_papers_count = len(self.used_papers)
+        self.used_papers.clear()
         print("[clear_package] Package cleared.")
         print("[clear_package] Initial add quantity reset.")
+        print(f"[clear_package] Used papers list reset ({previous_papers_count} papers cleared).")
 
     def show_package(self):
-        """Display information about the current package."""
+        """Display information about the current package with source breakdown."""
         if not self.current_package["chunks"]:
             print("[show_package] Package is empty.")
             return
+        
+        # Calculate source distribution
+        source_counts = {'pubmed': 0, 'biorxiv': 0, 'medrxiv': 0, 'unknown': 0}
+        
+        for metadata in self.current_package["metadata"]:
+            source = metadata.get('source', '').lower()
+            source_name = metadata.get('source_name', '').lower()
+            
+            if 'pubmed' in source or 'pubmed' in source_name:
+                source_counts['pubmed'] += 1
+            elif 'biorxiv' in source or 'biorxiv' in source_name:
+                source_counts['biorxiv'] += 1
+            elif 'medrxiv' in source or 'medrxiv' in source_name:
+                source_counts['medrxiv'] += 1
+            else:
+                source_counts['unknown'] += 1
+        
         print(f"[show_package] Current Package:")
         print(f"   📚 Total chunks: {len(self.current_package['chunks'])}")
         print(f"   📝 Total characters: {self.current_package['total_chars']:,}")
         print(f"   📖 Sources: {', '.join(self.current_package['sources'])}")
+        print(f"   📊 Used papers tracked: {len(self.used_papers)}")
+        
+        print(f"   📊 Source distribution:")
+        print(f"     PubMed: {source_counts['pubmed']} chunks")
+        print(f"     BioRxiv: {source_counts['biorxiv']} chunks")
+        print(f"     MedRxiv: {source_counts['medrxiv']} chunks")
+        if source_counts['unknown'] > 0:
+            print(f"     Unknown: {source_counts['unknown']} chunks")
+        
         print(f"\n[show_package] Sample chunks:")
         for i, chunk in enumerate(self.current_package["chunks"][:3], 1):
             metadata = self.current_package["metadata"][i-1]
             title = metadata.get("title", "No title")[:60]
-            print(f"   {i}. {title}...")
+            source = metadata.get("source", "Unknown")
+            print(f"   {i}. {title}... (Source: {source})")
         if len(self.current_package["chunks"]) > 3:
             print(f"   ... and {len(self.current_package['chunks']) - 3} more chunks")
 
@@ -946,7 +1172,7 @@ class EnhancedRAGQuery:
             attempts += 1
             print(f"\n🧠 Generating hypothesis attempt {attempts}...")
             
-            # Select new chunks from ChromaDB for this hypothesis generation
+            # ALWAYS select new chunks for EVERY hypothesis attempt to ensure diversity
             if self.use_chromadb and self.chroma_manager and self.initial_add_quantity:
                 print(f"🔄 Selecting new chunks for hypothesis attempt {attempts}...")
                 dynamic_chunks = self.select_dynamic_chunks_for_generation(package_prompt)
@@ -1327,7 +1553,7 @@ class EnhancedRAGQuery:
                 attempts += 1
                 print(f"\n🧠 Generating hypothesis attempt {attempts} for meta-hypothesis {meta_idx}...")
                 
-                # Select new chunks from ChromaDB for this hypothesis generation
+                # ALWAYS select new chunks for EVERY hypothesis attempt to ensure diversity
                 if self.use_chromadb and self.chroma_manager and self.initial_add_quantity:
                     print(f"🔄 Selecting new chunks for hypothesis attempt {attempts}...")
                     dynamic_chunks = self.select_dynamic_chunks_for_generation(meta_hypothesis)
@@ -1599,7 +1825,11 @@ class EnhancedRAGQuery:
                 # Auto-adjust column widths for summary
                 for column in summary_sheet.columns:
                     max_length = 0
-                    column_letter = column[0].column_letter
+                    try:
+                        column_letter = column[0].column_letter
+                    except AttributeError:
+                        # Skip merged cells that don't have column_letter attribute
+                        continue
                     for cell in column:
                         try:
                             if len(str(cell.value)) > max_length:
@@ -1649,7 +1879,11 @@ class EnhancedRAGQuery:
                         # Auto-adjust column widths
                         for column in sheet.columns:
                             max_length = 0
-                            column_letter = column[0].column_letter
+                            try:
+                                column_letter = column[0].column_letter
+                            except AttributeError:
+                                # Skip merged cells that don't have column_letter attribute
+                                continue
                             for cell in column:
                                 try:
                                     if len(str(cell.value)) > max_length:
@@ -1670,7 +1904,11 @@ class EnhancedRAGQuery:
                     worksheet = writer.sheets['Hypotheses']
                     for column in worksheet.columns:
                         max_length = 0
-                        column_letter = column[0].column_letter
+                        try:
+                            column_letter = column[0].column_letter
+                        except AttributeError:
+                            # Skip merged cells that don't have column_letter attribute
+                            continue
                         for cell in column:
                             try:
                                 if len(str(cell.value)) > max_length:
@@ -1738,7 +1976,11 @@ class EnhancedRAGQuery:
                     # Auto-adjust column widths
                     for column in worksheet.columns:
                         max_length = 0
-                        column_letter = column[0].column_letter
+                        try:
+                            column_letter = column[0].column_letter
+                        except AttributeError:
+                            # Skip merged cells that don't have column_letter attribute
+                            continue
                         for cell in column:
                             try:
                                 if len(str(cell.value)) > max_length:
@@ -1788,8 +2030,12 @@ class EnhancedRAGQuery:
         print(f"   - 'export': Export hypothesis records to Excel")
         print(f"   - 'records': Show current hypothesis records")
         print(f"   - 'clear_records': Clear hypothesis records")
+        print(f"   - 'reset_papers': Reset used papers list (allow reusing papers)")
+        print(f"   - 'papers_status': Show used papers tracking status")
         print(f"   💡 Note: Large queries may take longer and use more API calls. Use 'clear' if you get errors.")
-        print(f"   🆕 Dynamic chunk selection: Each hypothesis will use new chunks from the database!")
+        print(f"   🆕 Dynamic chunk selection: EVERY hypothesis uses completely new chunks from the database!")
+        print(f"   🆕 Source diversity: Ensures balanced selection from pubmed, biorxiv, and medrxiv!")
+        print(f"   🆕 Paper tracking: Automatically avoids reusing the same research papers!")
         print(f"   🆕 Meta-hypothesis generator: Creates diverse research directions for comprehensive exploration!")
         print(f"   📚 Default: 1500 chunks per hypothesis generation for richer context!")
         print()
@@ -1811,6 +2057,10 @@ class EnhancedRAGQuery:
                 self.show_hypothesis_records()
             elif query.lower() == 'clear_records':
                 self.clear_hypothesis_records()
+            elif query.lower() == 'reset_papers':
+                self.reset_used_papers()
+            elif query.lower() == 'papers_status':
+                self.show_used_papers_status()
             elif query.lower().startswith('meta '):
                 try:
                     parts = query.split(' ', 1)
@@ -1947,7 +2197,7 @@ class EnhancedRAGQuery:
                             attempts += 1
                             print(f"\n🧠 Generating hypothesis attempt {attempts}...")
                             
-                            # Select new chunks from ChromaDB for this hypothesis generation
+                            # ALWAYS select new chunks for EVERY hypothesis attempt to ensure diversity
                             if self.use_chromadb and self.chroma_manager and self.initial_add_quantity:
                                 print(f"🔄 Selecting new chunks for hypothesis attempt {attempts}...")
                                 dynamic_chunks = self.select_dynamic_chunks_for_generation(search_query)
@@ -2195,7 +2445,7 @@ class EnhancedRAGQuery:
             print(f"\n🔄 Hypothesis Attempt {attempts}/{max_attempts}")
             print("-" * 60)
             
-            # Select new chunks from ChromaDB for this hypothesis generation
+            # ALWAYS select new chunks for EVERY hypothesis attempt to ensure diversity
             if self.use_chromadb and self.chroma_manager and self.initial_add_quantity:
                 print(f"🔄 Selecting new chunks for hypothesis attempt {attempts}...")
                 dynamic_chunks = self.select_dynamic_chunks_for_generation(query)
@@ -2374,7 +2624,7 @@ class EnhancedRAGQuery:
         for hyp_idx in range(n):
             print(f"\nGenerating hypothesis {hyp_idx+1}/{n}\n")
             
-            # Select new chunks from ChromaDB for this hypothesis generation
+            # ALWAYS select new chunks for EVERY hypothesis to ensure diversity
             if self.use_chromadb and self.chroma_manager and self.initial_add_quantity:
                 print(f"🔄 Selecting new chunks for hypothesis {hyp_idx+1}...")
                 dynamic_chunks = self.select_dynamic_chunks_for_generation("package query")
@@ -2460,6 +2710,9 @@ def main():
     print("📚 Citation tracking and academic formatting")
     print("📊 Excel export with comprehensive data")
     print("📈 Real-time progress tracking")
+    print("🔄 EVERY hypothesis uses completely new chunks for maximum diversity!")
+    print("📄 Paper tracking prevents reusing the same research papers!")
+    print("🎯 Source diversity: Balanced selection from pubmed, biorxiv, and medrxiv!")
     print("=" * 80)
     
     # Run interactive search
