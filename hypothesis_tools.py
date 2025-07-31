@@ -1,4 +1,6 @@
 import re
+import json
+import os
 from typing import List, Optional
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
@@ -18,6 +20,55 @@ def is_ubr5_related(text: str) -> bool:
             return True
     return False
 
+def validate_hypothesis_format(hypothesis: str) -> tuple[bool, str]:
+    """
+    Validate that a hypothesis contains both required sections.
+    
+    Returns:
+        tuple: (is_valid: bool, reason: str)
+    """
+    hypothesis_lower = hypothesis.lower()
+    
+    # Check for hypothesis statement section
+    has_hypothesis_statement = any(phrase in hypothesis_lower for phrase in [
+        'hypothesis statement',
+        'hypothesis:',
+        'hypothesis ',
+        'we hypothesize',
+        'we propose',
+        'we suggest',
+        'our hypothesis',
+        'the hypothesis'
+    ])
+    
+    # Check for experimental approach section
+    has_experimental_approach = any(phrase in hypothesis_lower for phrase in [
+        'experimental approach',
+        'experimental design',
+        'methods',
+        'methodology',
+        'experimental methods',
+        'experimental strategy',
+        'approach:',
+        'approach ',
+        'we will',
+        'we propose to',
+        'we suggest to',
+        'to test this',
+        'to investigate',
+        'to examine',
+        'to study'
+    ])
+    
+    if not has_hypothesis_statement and not has_experimental_approach:
+        return False, "Missing both hypothesis statement and experimental approach sections"
+    elif not has_hypothesis_statement:
+        return False, "Missing hypothesis statement section"
+    elif not has_experimental_approach:
+        return False, "Missing experimental approach section"
+    else:
+        return True, "Format validation passed"
+
 class MetaHypothesisGenerator:
     """
     Meta-hypothesis generator that takes a user prompt and creates 5 different prompts
@@ -28,17 +79,21 @@ class MetaHypothesisGenerator:
 
     def build_meta_prompt(self, user_prompt: str) -> str:
         """Build prompt for generating 5 different meta-hypotheses from user input."""
+        config = get_lab_config()
+        lab_name = config.get("lab_name", "Dr. Xiaojing Ma")
+        institution = config.get("institution", "Weill Cornell Medicine")
+        
         prompt = f"""
 # Meta-Hypothesis Generator Prompt
 
 ## Role
-You are an expert research strategist specializing in UBR-5 protein research and Dr. Xiaojing Ma's laboratory at Weill Cornell Medicine. Your task is to take a user's research query and break it down into 5 distinct, complementary research directions.
+You are an expert research strategist specializing in UBR-5 protein research and {lab_name}'s laboratory at {institution}. Your task is to take a user's research query and break it down into 5 distinct, complementary research directions.
 
 ## Task
 Given the user's research query, generate exactly 5 different meta-hypotheses that represent diverse angles and approaches to the same research area. Each meta-hypothesis should be:
 - Focused on a specific aspect or mechanism
 - Complementary to the others (not redundant)
-- Feasible for Dr. Ma's lab to investigate
+- Feasible for {lab_name}'s lab to investigate
 - Novel and scientifically interesting
 
 ## Guidelines
@@ -109,42 +164,44 @@ class HypothesisGenerator:
 
     def build_prompt(self, context_chunks: List[str], n: int = 3) -> str:
         context = "\n\n".join(context_chunks)
+        config = get_lab_config()
+        lab_name = config.get("lab_name", "Dr. Xiaojing Ma")
+        institution = config.get("institution", "Weill Cornell Medicine")
+        
         prompt = f"""
-# AI Research Assistant Prompt
+# Scientific Hypothesis Generator
 
 ## Role
-You are a molecular biology research specialist with expertise in UBR-5 protein research, working within the context of Dr. Xiaojing Ma's laboratory at Weill Cornell Medicine.
+You are a molecular biology research specialist with expertise in UBR-5 protein research, working within the context of {lab_name}'s laboratory at {institution}.
 
-## Primary Responsibilities
+## Task
+Based on the provided literature context, generate {n} novel, scientifically sound hypotheses related to UBR-5 protein function, regulation, or therapeutic applications.
 
-### 1. Hypothesis Generation
-Analyze provided information \"batches\" to develop one novel, scientifically sound hypothesis related to UBR-5 protein function, regulation, or therapeutic applications.
+## CRITICAL OUTPUT FORMAT REQUIREMENTS
+Each hypothesis MUST include BOTH of the following sections:
 
-### 2. Critical Evaluation
-Assess generated hypotheses using three key criteria:
-- Scientific accuracy and feasibility
-- Novelty and originality in the field
-- Relevance to Dr. Xiaojing Ma's research program and laboratory capabilities
-- Ability for Dr. Xiaojing Ma's lab to execute said experiment, based on your previous reading of Dr. Xiaojing Ma's papers.
+1. **Hypothesis Statement**: A clear, testable hypothesis about UBR-5 (e.g., "We hypothesize that...", "Our hypothesis is that...", "The hypothesis is that...")
+2. **Experimental Approach**: Specific methods and techniques to test the hypothesis (e.g., "To test this hypothesis, we will...", "Our experimental approach involves...", "We propose to investigate this by...")
 
-### 3. Experimental Design
-Develop detailed research proposal for the hypothesis, including:
-- Specific experimental approaches and methodologies
-- Required resources and timelines
-- Expected outcomes and potential limitations
+Additional sections (optional but recommended):
+3. **Rationale**: Scientific basis and reasoning for the hypothesis
+4. **Expected Outcomes**: What results would support or refute the hypothesis
+5. **Significance**: Potential impact on understanding UBR-5 biology or therapeutic development
 
-## Communication Style
-- Maintain a highly analytical, critical, and scientifically rigorous approach.
-- Please limit your output to 1000 words.
+## Requirements
+- Each hypothesis MUST contain both Hypothesis Statement AND Experimental Approach sections
+- Each hypothesis should be complete and self-contained
+- Focus on mechanistic insights and therapeutic applications
+- Ensure hypotheses are testable with current laboratory techniques
+- Maintain scientific rigor and accuracy
+- Each hypothesis should be 200-400 words
+- Stay within character limits for API compatibility
 
-Please generate a hypothesis and a research plan.
----
-
-Literature Context:
+## Literature Context
 {context}
 
-Hypotheses:
-1.
+## Generated Hypotheses
+
 """
         return prompt
 
@@ -153,25 +210,114 @@ Hypotheses:
         if not self.model:
             # Fallback placeholder
             return [f"Hypothesis {i+1} about UBR-5 (see prompt for details)." for i in range(n)]
-        response = self.model.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt
-        )
-        text = response.text
-        return self._parse_hypotheses(text, n)
+        
+        try:
+            response = self.model.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt
+            )
+            text = response.text
+            print(f"[HypothesisGenerator.generate] Raw response length: {len(text)} characters")
+            
+            # Parse the hypotheses
+            hypotheses = self._parse_hypotheses(text, n)
+            print(f"[HypothesisGenerator.generate] Parsed {len(hypotheses)} hypotheses")
+            
+            # Validate hypotheses
+            valid_hypotheses = []
+            for i, hyp in enumerate(hypotheses):
+                if hyp and len(hyp) > 50:
+                    # Validate format requirements
+                    is_valid_format, format_reason = validate_hypothesis_format(hyp)
+                    if is_valid_format:
+                        valid_hypotheses.append(hyp)
+                        print(f"[HypothesisGenerator.generate] Hypothesis {i+1} length: {len(hyp)} characters - FORMAT VALID")
+                    else:
+                        print(f"[HypothesisGenerator.generate] Hypothesis {i+1} REJECTED: {format_reason}")
+                else:
+                    print(f"[HypothesisGenerator.generate] Hypothesis {i+1} too short or empty: {len(hyp)} characters")
+            
+            if not valid_hypotheses:
+                print(f"[HypothesisGenerator.generate] WARNING: No valid hypotheses generated. Raw text preview: {text[:200]}...")
+                # Return a fallback hypothesis
+                return [f"Generated hypothesis about UBR-5 based on provided literature context. Raw response: {text[:500]}..."]
+            
+            return valid_hypotheses
+            
+        except Exception as e:
+            print(f"[HypothesisGenerator.generate] ERROR: Failed to generate hypotheses: {e}")
+            return [f"Error generating hypothesis: {e}"]
 
     def _parse_hypotheses(self, text: str, n: int) -> List[str]:
-        # Parse numbered hypotheses from LLM output
+        # First try to parse numbered hypotheses from LLM output
         pattern = re.compile(r"\n?\s*(\d+)\.\s+(.*?)(?=\n\s*\d+\.|$)", re.DOTALL)
         matches = pattern.findall(text)
-        if matches:
+        
+        if matches and len(matches) >= n:
             # Return only the hypothesis text, up to n
-            return [m[1].strip() for m in matches[:n]]
-        # Fallback: split by lines
+            hypotheses = [m[1].strip() for m in matches[:n]]
+            # Clean up any remaining formatting
+            cleaned_hypotheses = []
+            for hyp in hypotheses:
+                # Remove any markdown formatting that might interfere
+                hyp = re.sub(r'\*\*(.*?)\*\*', r'\1', hyp)  # Remove bold formatting
+                hyp = re.sub(r'#+\s*', '', hyp)  # Remove headers
+                hyp = hyp.strip()
+                if hyp and len(hyp) > 50:  # Ensure minimum length
+                    cleaned_hypotheses.append(hyp)
+            return cleaned_hypotheses[:n]
+        
+        # Fallback: try to split by common section markers
+        if "Hypothesis Statement" in text or "Rationale" in text:
+            # Split by potential section markers
+            sections = re.split(r'\n\s*(?:Hypothesis Statement|Rationale|Experimental Approach|Expected Outcomes|Significance)\s*:', text)
+            if len(sections) > 1:
+                # Take the first substantial section as the hypothesis
+                hypothesis = sections[0].strip()
+                if len(hypothesis) > 50:
+                    return [hypothesis]
+        
+        # Final fallback: split by lines and take substantial content
         lines = [line.strip() for line in text.splitlines() if line.strip()]
-        return lines[:n]
+        if lines:
+            # Combine lines into a single hypothesis if they seem related
+            combined = ' '.join(lines[:10])  # Take first 10 lines
+            if len(combined) > 50:
+                return [combined]
+        
+        # If all else fails, return the original text as a single hypothesis
+        return [text.strip()] if text.strip() else []
 
-LAB_GOALS = "UBR5, cancer immunology, protein ubiquitination, mechanistic and therapeutic hypotheses, Dr. Xiaojing Ma's lab at Weill Cornell Medicine. The lab focuses on post-transcriptional regulation, ubiquitination, cancer models, and translational control."
+def get_lab_config():
+    """Get lab configuration from file or return default"""
+    config_file = "lab_config.json"
+    default_config = {
+        "lab_name": "Dr. Xiaojing Ma",
+        "institution": "Weill Cornell Medicine",
+        "research_focus": "UBR5, cancer immunology, protein ubiquitination, mechanistic and therapeutic hypotheses"
+    }
+    
+    if os.path.exists(config_file):
+        try:
+            with open(config_file, 'r') as f:
+                config = json.load(f)
+                return config
+        except Exception as e:
+            print(f"⚠️  Error reading lab config: {e}, using default")
+    
+    return default_config
+
+def get_lab_goals():
+    """Get lab goals based on current configuration"""
+    config = get_lab_config()
+    lab_name = config.get("lab_name", "Dr. Xiaojing Ma")
+    institution = config.get("institution", "Weill Cornell Medicine")
+    research_focus = config.get("research_focus", "UBR5, cancer immunology, protein ubiquitination, mechanistic and therapeutic hypotheses")
+    
+    return f"{research_focus}, {lab_name}'s lab at {institution}. The lab focuses on post-transcriptional regulation, ubiquitination, cancer models, and translational control."
+
+# Default LAB_GOALS for backward compatibility
+LAB_GOALS = get_lab_goals()
 
 class HypothesisCritic:
     """
@@ -184,8 +330,11 @@ class HypothesisCritic:
 
     def build_prompt(self, hypothesis: str, context_chunks: list) -> str:
         context = "\n\n".join(context_chunks)
+        config = get_lab_config()
+        lab_name = config.get("lab_name", "Dr. Xiaojing Ma")
+        
         prompt = f"""
-You are an expert scientific reviewer for Dr. Xiaojing Ma's lab, specializing in UBR-5 and related pathways. Critically evaluate the following hypothesis in light of the provided literature. Discuss its novelty, plausibility, and potential impact. Point out any supporting or conflicting evidence from the context.
+You are an expert scientific reviewer for {lab_name}'s lab, specializing in UBR-5 and related pathways. Critically evaluate the following hypothesis in light of the provided literature. Discuss its novelty, plausibility, and potential impact. Point out any supporting or conflicting evidence from the context.
 Be extremely critical and professional.
 
 After your critique, provide:
@@ -222,8 +371,10 @@ Hypothesis:
         relevancy = self.compute_relevancy(hypothesis, prompt, lab_goals)
         if not self.model:
             # Fallback placeholder
+            config = get_lab_config()
+            lab_name = config.get("lab_name", "Dr. Xiaojing Ma")
             return {
-                "critique": f"Critique of hypothesis: '{hypothesis}'\n- This is a placeholder critique based on UBR-5 and Dr. Ma's lab context.",
+                "critique": f"Critique of hypothesis: '{hypothesis}'\n- This is a placeholder critique based on UBR-5 and {lab_name}'s lab context.",
                 "novelty": 100,
                 "accuracy": 100,
                 "relevancy": relevancy

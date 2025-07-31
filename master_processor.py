@@ -19,20 +19,21 @@ def show_menu():
     print("6. List loaded batches")
     print("7. Start Enhanced RAG System (with Hypothesis Generation & Critique)")
     print("8. Check ChromaDB status")
-    print("9. Exit")
-    print("10. Test Try (UBR-5 demo)")
-    print("11. Test Meta-Hypothesis Generator (UBR-5 tumor immunology)")
+    print("9. Configure Lab Name")
+    print("10. Exit")
+    print("11. Test Try (UBR-5 demo)")
+    print("12. Test Meta-Hypothesis Generator (UBR-5 tumor immunology)")
     print()
 
 def get_user_choice():
     """Get user choice for processing"""
     while True:
         try:
-            choice = input("Enter your choice (1-11): ").strip()
-            if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11']:
+            choice = input("Enter your choice (1-12): ").strip()
+            if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12']:
                 return choice
             else:
-                print("❌ Please enter a number between 1 and 11.")
+                print("❌ Please enter a number between 1 and 12.")
         except KeyboardInterrupt:
             print("\n👋 Goodbye!")
             sys.exit(0)
@@ -458,6 +459,83 @@ def list_loaded_batches():
     except Exception as e:
         print(f"❌ Error accessing vector database for batch listing: {e}")
 
+def get_lab_config():
+    """Get lab configuration from file or return default"""
+    config_file = "lab_config.json"
+    default_config = {
+        "lab_name": "Dr. Xiaojing Ma",
+        "institution": "Weill Cornell Medicine",
+        "research_focus": "UBR5, cancer immunology, protein ubiquitination, mechanistic and therapeutic hypotheses"
+    }
+    
+    if os.path.exists(config_file):
+        try:
+            with open(config_file, 'r') as f:
+                config = json.load(f)
+                return config
+        except Exception as e:
+            print(f"⚠️  Error reading lab config: {e}, using default")
+    
+    return default_config
+
+def save_lab_config(config):
+    """Save lab configuration to file"""
+    config_file = "lab_config.json"
+    try:
+        with open(config_file, 'w') as f:
+            json.dump(config, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"❌ Error saving lab config: {e}")
+        return False
+
+def configure_lab_name():
+    """Configure the lab name and research focus"""
+    print("\n🔧 Lab Configuration")
+    print("=" * 40)
+    
+    # Get current configuration
+    current_config = get_lab_config()
+    
+    print(f"Current lab name: {current_config.get('lab_name', 'Dr. Xiaojing Ma')}")
+    print(f"Current institution: {current_config.get('institution', 'Weill Cornell Medicine')}")
+    print(f"Current research focus: {current_config.get('research_focus', 'UBR5, cancer immunology, protein ubiquitination')}")
+    
+    print("\nEnter new values (press Enter to keep current value):")
+    
+    # Get new lab name
+    new_lab_name = input(f"Lab name [{current_config.get('lab_name', 'Dr. Xiaojing Ma')}]: ").strip()
+    if not new_lab_name:
+        new_lab_name = current_config.get('lab_name', 'Dr. Xiaojing Ma')
+    
+    # Get new institution
+    new_institution = input(f"Institution [{current_config.get('institution', 'Weill Cornell Medicine')}]: ").strip()
+    if not new_institution:
+        new_institution = current_config.get('institution', 'Weill Cornell Medicine')
+    
+    # Get new research focus
+    new_research_focus = input(f"Research focus [{current_config.get('research_focus', 'UBR5, cancer immunology, protein ubiquitination')}]: ").strip()
+    if not new_research_focus:
+        new_research_focus = current_config.get('research_focus', 'UBR5, cancer immunology, protein ubiquitination')
+    
+    # Create new configuration
+    new_config = {
+        "lab_name": new_lab_name,
+        "institution": new_institution,
+        "research_focus": new_research_focus
+    }
+    
+    # Save configuration
+    if save_lab_config(new_config):
+        print(f"\n✅ Lab configuration updated successfully!")
+        print(f"   Lab name: {new_lab_name}")
+        print(f"   Institution: {new_institution}")
+        print(f"   Research focus: {new_research_focus}")
+        print(f"\n💡 This configuration will be used in hypothesis generation and critique.")
+        print(f"   The changes will take effect when you restart the Enhanced RAG System.")
+    else:
+        print("❌ Failed to save lab configuration.")
+
 def main():
     print("🎯 Welcome to the Master Data Processor!")
     print("This will process your scientific papers and create searchable embeddings.")
@@ -524,10 +602,13 @@ def main():
             check_chromadb_status()
         
         elif choice == '9':
+            configure_lab_name()
+        
+        elif choice == '10':
             print("👋 Exiting. Goodbye!")
             break
         
-        elif choice == '10':
+        elif choice == '11':
             print("\n🚀 Running Test Try (UBR-5 demo)...\n")
             try:
                 from enhanced_rag_with_chromadb import EnhancedRAGQuery
@@ -553,7 +634,7 @@ def main():
             except Exception as e:
                 print(f"❌ Test Try failed: {e}")
         
-        elif choice == '11':
+        elif choice == '12':
             print("\n🧠 Running Meta-Hypothesis Generator Test (UBR-5 tumor immunology)...\n")
             try:
                 from enhanced_rag_with_chromadb import EnhancedRAGQuery
@@ -586,7 +667,7 @@ def main():
                 traceback.print_exc()
         
         # Ask if user wants to continue
-        if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11']:
+        if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12']:
             print(f"\n💡 Next steps:")
             if choice in ['1', '2', '3']:
                 print(f"   - Run option 4 to load data into vector database")
@@ -606,9 +687,12 @@ def main():
             if choice == '8':
                 print(f"   - Run option 7 to start the Enhanced RAG System")
                 print(f"   - Run option 4 to load more data if needed")
-            if choice == '10':
-                print(f"   - The Test Try (UBR-5 demo) runs a search and generates hypotheses.")
+            if choice == '9':
+                print(f"   - Lab configuration has been updated")
+                print(f"   - Run option 7 to start the Enhanced RAG System with new lab settings")
             if choice == '11':
+                print(f"   - The Test Try (UBR-5 demo) runs a search and generates hypotheses.")
+            if choice == '12':
                 print(f"   - The Meta-Hypothesis Generator Test automatically runs the meta-hypothesis generator")
                 print(f"   - Uses the prompt 'UBR-5 tumor immunology' to generate 5 diverse research directions")
                 print(f"   - Each meta-hypothesis generates 3 hypotheses with full critique and scoring")
