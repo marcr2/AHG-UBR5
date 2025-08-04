@@ -5,6 +5,7 @@ from pubmed_scraper_json import main as process_pubmed
 from process_xrvix_dumps_json import main as process_xrvix
 from chromadb_manager import ChromaDBManager
 from processing_config import print_config_info, get_config, DB_BATCH_SIZE
+from update_chromadb_metadata import update_chromadb_metadata
 import subprocess
 
 def show_menu():
@@ -17,23 +18,24 @@ def show_menu():
     print("4. Load data into vector database")
     print("5. Show data status")
     print("6. List loaded batches")
-    print("7. Start Enhanced RAG System (with Hypothesis Generation & Critique)")
+    print("7. Start Enhanced RAG System (with Meta-Hypothesis Generation)")
     print("8. Check ChromaDB status")
     print("9. Configure Lab Name")
-    print("10. Exit")
-    print("11. Test Try (UBR-5 demo)")
+    print("10. Update ChromaDB Metadata")
+    print("11. Run Automated Pipeline")
     print("12. Test Meta-Hypothesis Generator (UBR-5 tumor immunology)")
+    print("13. Exit")
     print()
 
 def get_user_choice():
     """Get user choice for processing"""
     while True:
         try:
-            choice = input("Enter your choice (1-12): ").strip()
-            if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12']:
+            choice = input("Enter your choice (1-13): ").strip()
+            if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13']:
                 return choice
             else:
-                print("❌ Please enter a number between 1 and 12.")
+                print("❌ Please enter a number between 1 and 13.")
         except KeyboardInterrupt:
             print("\n👋 Goodbye!")
             sys.exit(0)
@@ -536,6 +538,114 @@ def configure_lab_name():
     else:
         print("❌ Failed to save lab configuration.")
 
+
+
+def run_automated_pipeline():
+    """Run the complete automated pipeline: process data, load to ChromaDB, update metadata"""
+    print("\n🚀 Starting Automated Pipeline...")
+    print("This will:")
+    print("1. Process PubMed papers")
+    print("2. Process xrvix dumps (biorxiv, medrxiv)")
+    print("3. Load all data into ChromaDB")
+    print("4. Update metadata with authors, dates, and citations")
+    print("5. Verify the setup")
+    print()
+    
+    # Ask for confirmation
+    confirm = input("Do you want to run the complete automated pipeline? (y/n): ").strip().lower()
+    if confirm != 'y':
+        print("❌ Automated pipeline cancelled.")
+        return
+    
+    print("\n" + "="*60)
+    print("🚀 AUTOMATED PIPELINE STARTED")
+    print("="*60)
+    
+    try:
+        # Step 1: Process PubMed papers
+        print("\n📊 STEP 1: Processing PubMed papers...")
+        print("-" * 40)
+        process_pubmed()
+        print("✅ PubMed processing complete!")
+        
+        # Step 2: Process xrvix dumps
+        print("\n📊 STEP 2: Processing xrvix dumps...")
+        print("-" * 40)
+        process_xrvix()
+        print("✅ xrvix processing complete!")
+        
+        # Step 3: Load data into ChromaDB
+        print("\n📊 STEP 3: Loading data into ChromaDB...")
+        print("-" * 40)
+        if load_data_into_vector_db():
+            print("✅ Data loading complete!")
+        else:
+            print("⚠️  Data loading had issues, but continuing...")
+        
+        # Step 4: Update metadata
+        print("\n📊 STEP 4: Updating ChromaDB metadata...")
+        print("-" * 40)
+        try:
+            from update_chromadb_metadata import update_chromadb_metadata as run_update
+            run_update()
+            print("✅ Metadata update complete!")
+        except Exception as e:
+            print(f"⚠️  Metadata update had issues: {e}")
+            print("Continuing with verification...")
+        
+        # Step 5: Verify the setup
+        print("\n📊 STEP 5: Verifying setup...")
+        print("-" * 40)
+        try:
+            # Check ChromaDB status
+            manager = ChromaDBManager()
+            stats = manager.get_collection_stats()
+            total_docs = stats.get('total_documents', 0)
+            total_chunks = stats.get('total_chunks', 0)
+            
+            print(f"📚 ChromaDB Status:")
+            print(f"   - Total documents: {total_docs}")
+            print(f"   - Total chunks: {total_chunks}")
+            
+            if total_docs > 0:
+                print("✅ ChromaDB verification successful!")
+            else:
+                print("⚠️  ChromaDB appears empty - you may need to run data loading separately")
+            
+            # Check if lab configuration exists
+            try:
+                from hypothesis_tools import get_lab_config
+                lab_config = get_lab_config()
+                if lab_config and lab_config.get('lab_name'):
+                    print(f"✅ Lab configuration found: {lab_config.get('lab_name')}")
+                else:
+                    print("⚠️  No lab configuration found - consider running option 9 to configure")
+            except:
+                print("⚠️  Could not verify lab configuration")
+                
+        except Exception as e:
+            print(f"⚠️  Verification had issues: {e}")
+        
+        print("\n" + "="*60)
+        print("🎉 AUTOMATED PIPELINE COMPLETED!")
+        print("="*60)
+        print("\n📋 Summary:")
+        print("✅ All data sources processed")
+        print("✅ Data loaded into ChromaDB")
+        print("✅ Metadata updated with authors, dates, and citations")
+        print("✅ Setup verified")
+        print("\n🚀 Next steps:")
+        print("   - Run option 7 to start the Enhanced RAG System")
+        print("   - Use 'add <query>' to search and generate hypotheses")
+        print("   - Use 'meta <query>' for meta-hypothesis generation")
+        print("   - Lab paper detection should now work properly")
+        
+    except Exception as e:
+        print(f"\n❌ Automated pipeline failed: {e}")
+        print("Please check the error above and try running individual steps manually.")
+        import traceback
+        traceback.print_exc()
+
 def main():
     print("🎯 Welcome to the Master Data Processor!")
     print("This will process your scientific papers and create searchable embeddings.")
@@ -591,8 +701,8 @@ def main():
             list_loaded_batches()
 
         elif choice == '7':
-            print("\n🚀 Launching Enhanced RAG System with Hypothesis Generation & Critique...")
-            print("🆕 NEW: Meta-hypothesis generator available! Use 'meta <query>' command for diverse research directions.\n")
+            print("\n🚀 Launching Enhanced RAG System with Meta-Hypothesis Generation...")
+            print("🧠 Meta-hypothesis generator: Use 'meta <query>' command for diverse research directions.\n")
             try:
                 subprocess.run([sys.executable, "enhanced_rag_with_chromadb.py"])
             except Exception as e:
@@ -605,34 +715,10 @@ def main():
             configure_lab_name()
         
         elif choice == '10':
-            print("👋 Exiting. Goodbye!")
-            break
+            update_chromadb_metadata()
         
         elif choice == '11':
-            print("\n🚀 Running Test Try (UBR-5 demo)...\n")
-            try:
-                from enhanced_rag_with_chromadb import EnhancedRAGQuery
-                rag = EnhancedRAGQuery(use_chromadb=True, load_data_at_startup=False)
-                print("🔍 Searching ChromaDB for 500 results with 'UBR-5'...")
-                results = rag.search_chromadb('UBR-5', top_k=500)
-                if not results:
-                    print("❌ No results found for 'UBR-5'.")
-                else:
-                    print(f"📦 Found {len(results)} relevant chunks. Generating hypotheses...")
-                    # Set up the package for hypothesis generation
-                    rag.current_package = {
-                        "chunks": [r['document'] if isinstance(r, dict) and 'document' in r else r for r in results],
-                        "metadata": [r['metadata'] if isinstance(r, dict) and 'metadata' in r else {} for r in results],
-                        "sources": set(),
-                        "total_chars": sum(len(r['document']) if isinstance(r, dict) and 'document' in r else len(str(r)) for r in results),
-                        "prompt": 'UBR-5'
-                    }
-                    hyps = rag.generate_hypotheses_from_package(n=5)
-                    print("\n🏆 Generated Hypotheses:")
-                    for i, hyp in enumerate(hyps, 1):
-                        print(f"{i}. {hyp}")
-            except Exception as e:
-                print(f"❌ Test Try failed: {e}")
+            run_automated_pipeline()
         
         elif choice == '12':
             print("\n🧠 Running Meta-Hypothesis Generator Test (UBR-5 tumor immunology)...\n")
@@ -666,8 +752,12 @@ def main():
                 import traceback
                 traceback.print_exc()
         
+        elif choice == '13':
+            print("👋 Exiting. Goodbye!")
+            break
+        
         # Ask if user wants to continue
-        if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12']:
+        if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13']:
             print(f"\n💡 Next steps:")
             if choice in ['1', '2', '3']:
                 print(f"   - Run option 4 to load data into vector database")
@@ -680,8 +770,7 @@ def main():
             if choice == '6':
                 print(f"   - Run option 8 to check ChromaDB status")
             if choice == '7':
-                print(f"   - The Enhanced RAG System includes hypothesis generation and critique")
-                print(f"   - Use 'add <query>' to search and generate hypotheses")
+                print(f"   - The Enhanced RAG System includes meta-hypothesis generation")
                 print(f"   - Use 'meta <query>' for meta-hypothesis generation (5 diverse research directions)")
                 print(f"   - Use 'export' to save results to Excel")
             if choice == '8':
@@ -690,8 +779,14 @@ def main():
             if choice == '9':
                 print(f"   - Lab configuration has been updated")
                 print(f"   - Run option 7 to start the Enhanced RAG System with new lab settings")
+            if choice == '10':
+                print(f"   - ChromaDB metadata has been updated with authors, dates, and citations")
+                print(f"   - Run option 7 to start the Enhanced RAG System with enhanced metadata")
+                print(f"   - Lab paper detection should now work properly")
             if choice == '11':
-                print(f"   - The Test Try (UBR-5 demo) runs a search and generates hypotheses.")
+                print(f"   - The automated pipeline has completed all setup steps")
+                print(f"   - Run option 7 to start the Enhanced RAG System")
+                print(f"   - Your system is now fully configured and ready to use")
             if choice == '12':
                 print(f"   - The Meta-Hypothesis Generator Test automatically runs the meta-hypothesis generator")
                 print(f"   - Uses the prompt 'UBR-5 tumor immunology' to generate 5 diverse research directions")

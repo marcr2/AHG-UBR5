@@ -13,6 +13,71 @@ import random
 from processing_config import get_config, print_config_info
 
 import matplotlib.pyplot as plt
+
+def extract_publication_date(paper_data):
+    """Extract publication date from paper data."""
+    date_fields = [
+        'date', 'publication_date', 'published_date', 'date_published',
+        'pub_date', 'date_created', 'created_date', 'submitted_date',
+        'date_submitted', 'posted_date', 'date_posted'
+    ]
+    
+    for field in date_fields:
+        if field in paper_data and paper_data[field]:
+            date_str = str(paper_data[field])
+            try:
+                if re.match(r'\d{4}-\d{2}-\d{2}', date_str):
+                    return date_str
+                elif re.match(r'\d{4}', date_str):
+                    return f"{date_str}-01-01"
+                else:
+                    year_match = re.search(r'(\d{4})', date_str)
+                    if year_match:
+                        return f"{year_match.group(1)}-01-01"
+            except:
+                continue
+    
+    doi = paper_data.get('doi', '')
+    if doi:
+        year_match = re.search(r'(\d{4})', doi)
+        if year_match:
+            return f"{year_match.group(1)}-01-01"
+    
+    return f"{datetime.now().year}-01-01"
+
+def extract_citation_count(paper_data):
+    """Extract citation count from paper data."""
+    citation_fields = [
+        'citations', 'citation_count', 'cited_by_count', 'times_cited',
+        'citation_count', 'reference_count', 'cited_count'
+    ]
+    
+    for field in citation_fields:
+        if field in paper_data and paper_data[field] is not None:
+            try:
+                count = int(paper_data[field])
+                return str(max(0, count))
+            except (ValueError, TypeError):
+                continue
+    
+    return "not found"
+
+def extract_journal_info(paper_data):
+    """Extract journal information from paper data."""
+    journal_fields = [
+        'journal', 'journal_name', 'publication', 'source', 'venue',
+        'journal_title', 'publication_venue'
+    ]
+    
+    for field in journal_fields:
+        if field in paper_data and paper_data[field]:
+            return str(paper_data[field])
+    
+    source = paper_data.get('source', '')
+    if source in ['biorxiv', 'medrxiv']:
+        return f"{source.upper()}"
+    
+    return "Unknown journal"
 import matplotlib.dates as mdates
 from collections import deque
 import threading
@@ -250,6 +315,14 @@ def process_paper_embeddings(paper_data, api_key):
     title = row.get("title", "")
     doi = row.get("doi", "")
     abstract = row.get("abstract", "")
+    authors = row.get("authors", "")  # Add authors field
+    
+    # Extract additional metadata fields
+    publication_date = extract_publication_date(row)
+    citation_count = extract_citation_count(row)
+    journal = extract_journal_info(row)
+    year = publication_date[:4] if publication_date else str(datetime.now().year)
+    
     paragraphs = chunk_paragraphs(abstract)
     
     # Skip papers with no meaningful content
@@ -272,6 +345,10 @@ def process_paper_embeddings(paper_data, api_key):
             "metadata": {
                 "title": title,
                 "doi": doi,
+                "authors": authors,  # Add authors to metadata
+                "publication_date": publication_date,
+                "citation_count": citation_count,
+                "journal": journal,
                 "source": source,
                 "paper_index": idx,
                 "para_idx": i,
@@ -623,6 +700,13 @@ def process_paper_embeddings_optimized(paper_data, api_key, num_workers, worker_
     title = row.get("title", "")
     doi = row.get("doi", "")
     abstract = row.get("abstract", "")
+    authors = row.get("authors", "")  # Add authors field
+    
+    # Extract additional metadata fields
+    publication_date = extract_publication_date(row)
+    citation_count = extract_citation_count(row)
+    journal = extract_journal_info(row)
+    
     paragraphs = chunk_paragraphs(abstract)
     
     # Skip papers with no meaningful content
@@ -646,6 +730,10 @@ def process_paper_embeddings_optimized(paper_data, api_key, num_workers, worker_
                         "metadata": {
                             "title": title,
                             "doi": doi,
+                            "authors": authors,  # Add authors to metadata
+                            "publication_date": publication_date,
+                            "citation_count": citation_count,
+                            "journal": journal,
                             "source": source,
                             "paper_index": idx,
                             "para_idx": i,
@@ -686,6 +774,10 @@ def process_paper_embeddings_optimized(paper_data, api_key, num_workers, worker_
                         "metadata": {
                             "title": title,
                             "doi": doi,
+                            "authors": authors,  # Add authors to metadata
+                            "publication_date": publication_date,
+                            "citation_count": citation_count,
+                            "journal": journal,
                             "source": source,
                             "paper_index": idx,
                             "para_idx": i,
