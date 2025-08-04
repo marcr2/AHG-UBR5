@@ -27,8 +27,11 @@ def extract_authors_from_existing(metadata: Dict[str, Any]) -> str:
         # Look for common author patterns in titles
         # This is a fallback - ideally authors should be in the raw data
         author_patterns = [
-            r'by\s+([^,]+)',  # "by Author Name"
+            r'by\s+([^,]+(?:\s+et\s+al)?)',  # "by Author Name" or "by Author Name et al"
             r'([A-Z][a-z]+\s+[A-Z][a-z]+)\s+et\s+al',  # "Author et al"
+            r'(Dr\.\s+[A-Z][a-z]+\s+[A-Z][a-z]+)\s+et\s+al',  # "Dr. Author et al"
+            r'([A-Z][a-z]+\s+[A-Z][a-z]+)\s+and\s+others',  # "Author and others"
+            r'(Dr\.\s+[A-Z][a-z]+\s+[A-Z][a-z]+)\s+and\s+others',  # "Dr. Author and others"
         ]
         
         for pattern in author_patterns:
@@ -40,19 +43,46 @@ def extract_authors_from_existing(metadata: Dict[str, Any]) -> str:
 
 def extract_publication_date_from_existing(metadata: Dict[str, Any]) -> str:
     """Extract publication date from existing metadata."""
+    def is_valid_year(year_str):
+        """Check if a year string represents a valid scientific publication year."""
+        try:
+            year = int(year_str)
+            # Valid years should be between 1900 and current year + 1
+            current_year = datetime.now().year
+            return 1900 <= year <= current_year + 1
+        except (ValueError, TypeError):
+            return False
+    
     # Try to extract from DOI
     doi = metadata.get('doi', '')
     if doi:
         year_match = re.search(r'(\d{4})', doi)
-        if year_match:
+        if year_match and is_valid_year(year_match.group(1)):
             return f"{year_match.group(1)}-01-01"
     
     # Try to extract from title or other fields
     title = metadata.get('title', '')
     if title:
-        year_match = re.search(r'(\d{4})', title)
-        if year_match:
-            return f"{year_match.group(1)}-01-01"
+        # Try DD-MM-YYYY format first (as specified by user)
+        if re.match(r'\d{2}-\d{2}-\d{4}', title):
+            year = title[6:10]
+            if is_valid_year(year):
+                # Convert DD-MM-YYYY to YYYY-MM-DD
+                return f"{year}-{title[3:5]}-{title[0:2]}"
+        # Try YYYY-MM-DD format
+        elif re.match(r'\d{4}-\d{2}-\d{2}', title):
+            year = title[:4]
+            if is_valid_year(year):
+                return title
+        # Try YYYY format
+        elif re.match(r'\d{4}', title):
+            if is_valid_year(title):
+                return f"{title}-01-01"
+        else:
+            # Fallback to finding any 4-digit year
+            year_match = re.search(r'(\d{4})', title)
+            if year_match and is_valid_year(year_match.group(1)):
+                return f"{year_match.group(1)}-01-01"
     
     return f"{datetime.now().year}-01-01"
 

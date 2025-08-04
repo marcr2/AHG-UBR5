@@ -4,6 +4,7 @@ import pandas as pd
 from paperscraper.xrxiv.xrxiv_query import XRXivQuery
 import requests
 import json
+import re
 from tqdm.auto import tqdm
 import numpy as np
 from datetime import datetime
@@ -22,17 +23,39 @@ def extract_publication_date(paper_data):
         'date_submitted', 'posted_date', 'date_posted'
     ]
     
+    def is_valid_year(year_str):
+        """Check if a year string represents a valid scientific publication year."""
+        try:
+            year = int(year_str)
+            # Valid years should be between 1900 and current year + 1
+            current_year = datetime.now().year
+            return 1900 <= year <= current_year + 1
+        except (ValueError, TypeError):
+            return False
+    
     for field in date_fields:
         if field in paper_data and paper_data[field]:
             date_str = str(paper_data[field])
             try:
-                if re.match(r'\d{4}-\d{2}-\d{2}', date_str):
-                    return date_str
+                # Try DD-MM-YYYY format first (as specified by user)
+                if re.match(r'\d{2}-\d{2}-\d{4}', date_str):
+                    year = date_str[6:10]
+                    if is_valid_year(year):
+                        # Convert DD-MM-YYYY to YYYY-MM-DD
+                        return f"{year}-{date_str[3:5]}-{date_str[0:2]}"
+                # Try YYYY-MM-DD format
+                elif re.match(r'\d{4}-\d{2}-\d{2}', date_str):
+                    year = date_str[:4]
+                    if is_valid_year(year):
+                        return date_str
+                # Try YYYY format
                 elif re.match(r'\d{4}', date_str):
-                    return f"{date_str}-01-01"
+                    if is_valid_year(date_str):
+                        return f"{date_str}-01-01"
                 else:
+                    # Fallback to finding any 4-digit year
                     year_match = re.search(r'(\d{4})', date_str)
-                    if year_match:
+                    if year_match and is_valid_year(year_match.group(1)):
                         return f"{year_match.group(1)}-01-01"
             except:
                 continue
@@ -40,7 +63,7 @@ def extract_publication_date(paper_data):
     doi = paper_data.get('doi', '')
     if doi:
         year_match = re.search(r'(\d{4})', doi)
-        if year_match:
+        if year_match and is_valid_year(year_match.group(1)):
             return f"{year_match.group(1)}-01-01"
     
     return f"{datetime.now().year}-01-01"

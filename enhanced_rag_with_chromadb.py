@@ -3067,12 +3067,24 @@ class EnhancedRAGQuery:
 
         config = get_lab_config()
         lab_name = config.get("lab_name", "Dr. Xiaojing Ma")
-        institution = config.get("institution", "Weill Cornell Medicine")
 
         # Get author information from metadata
         authors = metadata.get('authors', '').lower()
-        if not authors:
-            return False
+        if not authors or authors == 'unknown authors':
+            # Try to extract authors from title if not available in metadata
+            from update_chromadb_metadata import extract_authors_from_existing
+            extracted_authors = extract_authors_from_existing(metadata)
+            if extracted_authors and extracted_authors != 'Unknown authors':
+                authors = extracted_authors.lower()
+            else:
+                return False
+
+        # Clean author string - remove "et al" and other common patterns
+        authors_clean = re.sub(r'\bet\s+al\.?\b', '', authors)  # Remove "et al" or "et al."
+        authors_clean = re.sub(r'\band\s+others\b', '', authors_clean)  # Remove "and others"
+        authors_clean = re.sub(r'\s*&\s*others\b', '', authors_clean)  # Remove "& others" (with optional space)
+        authors_clean = re.sub(r'\s+', ' ', authors_clean).strip()  # Normalize whitespace
+        authors_clean = re.sub(r'[,\s\.]+$', '', authors_clean)  # Remove trailing commas/spaces/periods
 
         # Check for lab PI name variations - more comprehensive matching
         lab_pi_variations = [
@@ -3094,34 +3106,11 @@ class EnhancedRAGQuery:
             "x m"
         ]
 
-        # Check for institution variations - more comprehensive matching
-        institution_variations = [
-            institution.lower(),
-            "weill cornell",
-            "weill cornell medicine",
-            "cornell",
-            "cornell university",
-            "weill cornell medical college",
-            "weill cornell medical center",
-            "wcm",
-            "cornell medical",
-            "cornell medicine"
-        ]
-
         # Check if any lab PI variation is in authors (using word boundaries)
-        is_lab_pi = False
         for variation in lab_pi_variations:
             # Use word boundaries to avoid partial matches
-            if re.search(r'\b' + re.escape(variation) + r'\b', authors):
-                is_lab_pi = True
-                break
-
-        # Check if institution is mentioned (optional - some papers might not list full institution)
-        has_institution = False
-        for variation in institution_variations:
-            if variation in authors:
-                has_institution = True
-                break
+            if re.search(r'\b' + re.escape(variation) + r'\b', authors_clean):
+                return True
 
         # Also check for common lab member patterns (if any are known)
         # This could be expanded with actual lab member names
@@ -3132,11 +3121,10 @@ class EnhancedRAGQuery:
         ]
         
         for pattern in lab_member_patterns:
-            if re.search(pattern, authors, re.IGNORECASE):
-                is_lab_pi = True
-                break
+            if re.search(pattern, authors_clean, re.IGNORECASE):
+                return True
 
-        return is_lab_pi or has_institution
+        return False
 
     def retrieve_relevant_chunks_with_lab_papers(self, query, top_k=1500, lab_paper_ratio=None, preferred_authors=None):
         """
