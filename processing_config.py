@@ -3,21 +3,9 @@ Configuration file for optimizing embedding processing performance.
 Adjust these settings based on your system capabilities and API limits.
 """
 
-# --- ADAPTIVE WORKER SCALING CONFIGURATION ---
-# Adaptive scaling parameters
-ADAPTIVE_SCALING_ENABLED = True
-INITIAL_MAX_WORKERS = 1
-MAX_WORKERS_LIMIT = 20  # Maximum workers allowed
-MIN_WORKERS = 1
-TARGET_RPS = 24  # Target requests per second
-SCALING_INTERVAL = 10  # Check every 10 seconds (faster response)
-WORKER_SCALE_UP_THRESHOLD = 0.8  # Scale up if RPS < 80% of target (19.2 RPS)
-WORKER_SCALE_DOWN_THRESHOLD = 1.2  # Scale down if RPS > 120% of target (28.8 RPS)
-STABILITY_PERIODS = 3  # Number of stable periods before scaling up again (deprecated - scaling up is now immediate)
-
-# --- FALLBACK CONFIGURATION (if adaptive scaling is disabled) ---
+# --- PARALLEL PROCESSING CONFIGURATION ---
 # Optimized parallel processing configuration
-MAX_WORKERS = 10  # Number of parallel workers for processing
+MAX_WORKERS = 5  # Number of parallel workers for processing
 BATCH_SIZE = 200  # Number of papers to process in each batch
 RATE_LIMIT_DELAY = 0.04  # Delay between requests (seconds) - optimized for 1500 req/min
 REQUEST_TIMEOUT = 60  # Timeout for API requests (seconds)

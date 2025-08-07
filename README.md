@@ -81,11 +81,51 @@ The system uses ChromaDB as a persistent vector database that stores embeddings 
 * Embedding files are stored in: `./pubmed_embeddings.json` and `./xrvix_embeddings/`
 * The system automatically detects if ChromaDB has data and skips reloading
 
+## Enhanced Metadata Collection
+
+The system now includes comprehensive metadata extraction capabilities that significantly enhance the research analysis experience:
+
+### 🎯 Impact Factor Integration
+* **Automatic impact factor extraction** from journal metadata
+* **Comprehensive journal database** with 60+ high-impact journals
+* **Smart estimation** for unknown journals using fuzzy matching
+* **Preprint server handling** (bioRxiv, medRxiv, arXiv)
+
+### 📋 Enhanced Metadata Fields
+The system now captures these additional fields when available:
+* `keywords` - Research keywords and subject tags
+* `affiliations` - Author institutional affiliations  
+* `funding` - Grant and funding source information
+* `license` - Publication license details
+* `categories` - Subject classifications
+* `language` - Publication language
+* `version` - Version info for preprints
+
+### 🔧 Migration and Testing Tools
+* **Migration script** for upgrading existing data: `enhanced_metadata_migration.py`
+* **Comprehensive testing suite**: `test_enhanced_metadata.py`
+* **Validation tools** for data quality assurance
+* **Backup and rollback** capabilities for safe upgrades
+
+### 📖 Documentation
+See the [Enhanced Metadata Guide](docs/ENHANCED_METADATA_GUIDE.md) for detailed usage instructions, migration procedures, and troubleshooting tips.
+
 ## Project Goals & Future Directions
 
-The primary goal is to create a functional PoC that validates this approach to AI-driven scientific discovery. Future work could involve:
+The primary goal is to create a functional PoC that validates this approach to AI-driven scientific discovery. **Recent enhancements** include comprehensive metadata collection and impact factor integration for richer research analysis.
 
-* Expanding the scraper to include a wider range of databases and pre-print servers.
-* Fine-tuning an open-source LLM on the Ubr5 corpus for enhanced domain-specific performance.
-* Developing a user interface (UI) for interacting with the hypothesis generation engine.
-* Evaluating the generated hypotheses with domain experts.
+### Completed Enhancements
+* ✅ **Enhanced metadata collection** from paperscraper sources
+* ✅ **Impact factor integration** with comprehensive journal database
+* ✅ **Pipeline integration** ensuring complete metadata preservation
+* ✅ **Migration tools** for upgrading existing datasets
+* ✅ **Testing suite** for validation and quality assurance
+
+### Future Directions
+* Expanding the scraper to include a wider range of databases and pre-print servers
+* Fine-tuning an open-source LLM on the Ubr5 corpus for enhanced domain-specific performance
+* Developing a user interface (UI) for interacting with the hypothesis generation engine
+* Evaluating the generated hypotheses with domain experts
+* **Advanced metadata analytics** using the enhanced metadata fields
+* **Citation network analysis** using comprehensive metadata
+* **Research trend analysis** powered by impact factors and keywords

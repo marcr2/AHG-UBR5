@@ -5,7 +5,6 @@ from pubmed_scraper_json import main as process_pubmed
 from process_xrvix_dumps_json import main as process_xrvix
 from chromadb_manager import ChromaDBManager
 from processing_config import print_config_info, get_config, DB_BATCH_SIZE
-from update_chromadb_metadata import update_chromadb_metadata
 import subprocess
 
 def show_menu():
@@ -21,21 +20,20 @@ def show_menu():
     print("7. Start Enhanced RAG System (with Meta-Hypothesis Generation)")
     print("8. Check ChromaDB status")
     print("9. Configure Lab Name")
-    print("10. Update ChromaDB Metadata")
-    print("11. Run Automated Pipeline")
-    print("12. Test Meta-Hypothesis Generator (UBR-5 tumor immunology)")
-    print("13. Exit")
+    print("10. Run Automated Pipeline")
+    print("11. Test Meta-Hypothesis Generator (UBR-5 tumor immunology)")
+    print("12. Exit")
     print()
 
 def get_user_choice():
     """Get user choice for processing"""
     while True:
         try:
-            choice = input("Enter your choice (1-13): ").strip()
-            if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13']:
+            choice = input("Enter your choice (1-12): ").strip()
+            if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12']:
                 return choice
             else:
-                print("❌ Please enter a number between 1 and 13.")
+                print("❌ Please enter a number between 1 and 12.")
         except KeyboardInterrupt:
             print("\n👋 Goodbye!")
             sys.exit(0)
@@ -109,41 +107,16 @@ def load_data_into_vector_db():
             else:
                 print("❌ Failed to load PubMed data")
         
-        # Load xrvix embeddings (multi-file) - using robust loader for large datasets
+        # Load xrvix embeddings (multi-file)
         if os.path.exists("xrvix_embeddings"):
-            print("🔄 Loading xrvix embeddings (using robust loader)...")
-            
-            # Use robust loader for large datasets
-            try:
-                from robust_xrvix_loader import RobustXrvixLoader
-                robust_loader = RobustXrvixLoader(manager)
-                
-                success = robust_loader.load_with_progress(
-                    embeddings_dir="xrvix_embeddings",
-                    sources=None,  # All sources
-                    batch_size=20,  # Process 20 batch files at a time (very conservative)
-                    db_batch_size=100,  # Add 100 embeddings to ChromaDB at once (very conservative)
-                    max_batches_per_run=None  # Process all batches
-                )
-                
-                if success:
-                    stats = manager.get_collection_stats()
-                    total_docs = stats.get('total_documents', 0)
-                    print(f"✅ Loaded xrvix embeddings (total documents: {total_docs})")
-                    total_loaded = total_docs
-                else:
-                    print("❌ Failed to load xrvix embeddings with robust loader")
-                    
-            except ImportError:
-                # Fallback to original method if robust loader not available
-                print("⚠️  Robust loader not available, using original method...")
-                if manager.add_embeddings_from_directory("xrvix_embeddings", db_batch_size=DB_BATCH_SIZE):
-                    stats = manager.get_collection_stats()
-                    total_docs = stats.get('total_documents', 0)
-                    print(f"✅ Loaded xrvix embeddings (total documents: {total_docs})")
-                    total_loaded = total_docs
-                else:
-                    print("❌ Failed to load xrvix embeddings")
+            print("🔄 Loading xrvix embeddings...")
+            if manager.add_embeddings_from_directory("xrvix_embeddings", db_batch_size=DB_BATCH_SIZE):
+                stats = manager.get_collection_stats()
+                total_docs = stats.get('total_documents', 0)
+                print(f"✅ Loaded xrvix embeddings (total documents: {total_docs})")
+                total_loaded = total_docs
+            else:
+                print("❌ Failed to load xrvix embeddings")
         
         if total_loaded == 0:
             print("⚠️  No data was loaded. Make sure you have processed some data first.")
@@ -582,19 +555,8 @@ def run_automated_pipeline():
         else:
             print("⚠️  Data loading had issues, but continuing...")
         
-        # Step 4: Update metadata
-        print("\n📊 STEP 4: Updating ChromaDB metadata...")
-        print("-" * 40)
-        try:
-            from update_chromadb_metadata import update_chromadb_metadata as run_update
-            run_update()
-            print("✅ Metadata update complete!")
-        except Exception as e:
-            print(f"⚠️  Metadata update had issues: {e}")
-            print("Continuing with verification...")
-        
-        # Step 5: Verify the setup
-        print("\n📊 STEP 5: Verifying setup...")
+        # Step 4: Verify the setup
+        print("\n📊 STEP 4: Verifying setup...")
         print("-" * 40)
         try:
             # Check ChromaDB status
@@ -715,12 +677,9 @@ def main():
             configure_lab_name()
         
         elif choice == '10':
-            update_chromadb_metadata()
-        
-        elif choice == '11':
             run_automated_pipeline()
         
-        elif choice == '12':
+        elif choice == '11':
             print("\n🧠 Running Meta-Hypothesis Generator Test (UBR-5 tumor immunology)...\n")
             try:
                 from enhanced_rag_with_chromadb import EnhancedRAGQuery
@@ -730,19 +689,19 @@ def main():
                 test_prompt = "UBR-5 tumor immunology"
                 print(f"🔍 Testing meta-hypothesis generator with prompt: '{test_prompt}'")
                 print("📚 Using default 1500 chunks per meta-hypothesis")
-                print("⏱️  This will generate 5 meta-hypotheses, then 3 hypotheses per meta-hypothesis")
+                print("⏱️  This will generate 5 meta-hypotheses, then 5 ACCEPTED hypotheses per meta-hypothesis")
                 print("🚀 Starting meta-hypothesis generation...\n")
                 
                 # Run the meta-hypothesis generator
                 results = rag.generate_hypotheses_with_meta_generator(
                     user_prompt=test_prompt,
-                    n_per_meta=3,
+                    n_per_meta=5,
                     chunks_per_meta=1500
                 )
                 
                 if results:
                     print(f"\n🎉 Meta-hypothesis generation completed successfully!")
-                    print(f"📊 Generated {len(results)} total hypotheses across 5 meta-hypotheses")
+                    print(f"📊 Generated {len(results)} total accepted hypotheses across 5 meta-hypotheses")
                     print(f"💾 Results have been saved to the hypothesis_export folder")
                 else:
                     print("❌ Meta-hypothesis generation failed or returned no results.")
@@ -752,12 +711,12 @@ def main():
                 import traceback
                 traceback.print_exc()
         
-        elif choice == '13':
+        elif choice == '12':
             print("👋 Exiting. Goodbye!")
             break
         
         # Ask if user wants to continue
-        if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13']:
+        if choice in ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12']:
             print(f"\n💡 Next steps:")
             if choice in ['1', '2', '3']:
                 print(f"   - Run option 4 to load data into vector database")
@@ -780,14 +739,10 @@ def main():
                 print(f"   - Lab configuration has been updated")
                 print(f"   - Run option 7 to start the Enhanced RAG System with new lab settings")
             if choice == '10':
-                print(f"   - ChromaDB metadata has been updated with authors, dates, and citations")
-                print(f"   - Run option 7 to start the Enhanced RAG System with enhanced metadata")
-                print(f"   - Lab paper detection should now work properly")
-            if choice == '11':
                 print(f"   - The automated pipeline has completed all setup steps")
                 print(f"   - Run option 7 to start the Enhanced RAG System")
                 print(f"   - Your system is now fully configured and ready to use")
-            if choice == '12':
+            if choice == '11':
                 print(f"   - The Meta-Hypothesis Generator Test automatically runs the meta-hypothesis generator")
                 print(f"   - Uses the prompt 'UBR-5 tumor immunology' to generate 5 diverse research directions")
                 print(f"   - Each meta-hypothesis generates 3 hypotheses with full critique and scoring")

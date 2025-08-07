@@ -530,7 +530,7 @@ class EnhancedRAGQuery:
                 source_name = metadata.get('source_name', 'Unknown')
                 title = metadata.get('title', 'No title')
                 doi = metadata.get('doi', 'No DOI')
-                authors = metadata.get('authors', 'Unknown authors')
+                authors = metadata.get('author', metadata.get('authors', 'Unknown authors'))
                 journal = metadata.get('journal', 'Unknown journal')
                 # Extract year from publication_date
                 publication_date = metadata.get('publication_date', '')
@@ -1468,7 +1468,7 @@ class EnhancedRAGQuery:
                     source_name = metadata.get('source_name', 'Unknown')
                     title = metadata.get('title', 'No title')
                     doi = metadata.get('doi', 'No DOI')
-                    authors = metadata.get('authors', 'Unknown authors')
+                    authors = metadata.get('author', metadata.get('authors', 'Unknown authors'))
                     journal = metadata.get('journal', 'Unknown journal')
                     # Extract year from publication_date
                     publication_date = metadata.get('publication_date', '')
@@ -1669,18 +1669,19 @@ class EnhancedRAGQuery:
 
         return hypotheses[:n]
 
-    def generate_hypotheses_with_meta_generator(self, user_prompt: str, n_per_meta: int = 3, chunks_per_meta: int = 1500):
+    def generate_hypotheses_with_meta_generator(self, user_prompt: str, n_per_meta: int = 5, chunks_per_meta: int = 1500):
         """
         Generate hypotheses using the meta-hypothesis generator approach.
 
         This method:
         1. Takes the user's prompt and generates 5 meta-hypotheses
-        2. For each meta-hypothesis, generates n_per_meta hypotheses using the existing system
-        3. Returns all generated hypotheses with their critiques
+        2. For each meta-hypothesis, generates hypotheses until exactly 5 are accepted
+        3. Only proceeds to the next meta-hypothesis after 5 hypotheses are accepted for the current one
+        4. Returns all generated hypotheses with their critiques
 
         Args:
             user_prompt: The original user query
-            n_per_meta: Number of hypotheses to generate per meta-hypothesis (default: 3)
+            n_per_meta: Number of accepted hypotheses required per meta-hypothesis (default: 5)
             chunks_per_meta: Number of context chunks to use per meta-hypothesis (default: 1500)
         """
         if not self.meta_hypothesis_generator or not self.hypothesis_generator or not self.hypothesis_critic:
@@ -1690,7 +1691,7 @@ class EnhancedRAGQuery:
         print(f"\n🧠 META-HYPOTHESIS GENERATION SESSION")
         print("=" * 80)
         print(f"Original Query: {user_prompt}")
-        print(f"Generating {n_per_meta} hypotheses per meta-hypothesis")
+        print(f"Requiring {n_per_meta} ACCEPTED hypotheses per meta-hypothesis")
         print("=" * 80)
 
         # Step 1: Generate meta-hypotheses
@@ -1708,7 +1709,7 @@ class EnhancedRAGQuery:
             print(f"❌ Error generating meta-hypotheses: {e}")
             return None
 
-        # Step 2: For each meta-hypothesis, generate hypotheses
+        # Step 2: For each meta-hypothesis, generate hypotheses until exactly n_per_meta are accepted
         all_hypotheses = []
         total_meta_hypotheses = len(meta_hypotheses)
 
@@ -1729,14 +1730,15 @@ class EnhancedRAGQuery:
             print(f"Meta-hypothesis: {meta_hypothesis}")
             print("-" * 60)
 
-            # Generate hypotheses for this meta-hypothesis
+            # Generate hypotheses for this meta-hypothesis until exactly n_per_meta are accepted
             meta_hypotheses_generated = []
             attempts = 0
-            max_attempts = n_per_meta * 3  # Allow more attempts to get enough hypotheses
+            max_attempts = n_per_meta * 10  # Allow more attempts to get enough accepted hypotheses
 
             while len(meta_hypotheses_generated) < n_per_meta and attempts < max_attempts:
                 attempts += 1
                 print(f"\n🧠 Generating hypothesis attempt {attempts} for meta-hypothesis {meta_idx}...")
+                print(f"📊 Progress: {len(meta_hypotheses_generated)}/{n_per_meta} accepted hypotheses")
 
                 # ALWAYS select new chunks for EVERY hypothesis attempt to ensure maximum diversity
                 if self.use_chromadb and self.chroma_manager and self.initial_add_quantity:
@@ -1853,7 +1855,7 @@ class EnhancedRAGQuery:
                                     source_name = metadata.get('source_name', 'Unknown')
                                     title = metadata.get('title', 'No title')
                                     doi = metadata.get('doi', 'No DOI')
-                                    authors = metadata.get('authors', 'Unknown authors')
+                                    authors = metadata.get('author', metadata.get('authors', 'Unknown authors'))
                                     journal = metadata.get('journal', 'Unknown journal')
                                     # Extract year from publication_date
                                     publication_date = metadata.get('publication_date', '')
@@ -1917,7 +1919,12 @@ class EnhancedRAGQuery:
                         # Accept hypothesis if it meets criteria
                         if verdict == "ACCEPTED":
                             meta_hypotheses_generated.append(record)
-                            print(f"✅ Hypothesis accepted for meta-hypothesis {meta_idx}!")
+                            print(f"✅ Hypothesis accepted for meta-hypothesis {meta_idx}! ({len(meta_hypotheses_generated)}/{n_per_meta})")
+                            
+                            # Check if we have enough accepted hypotheses for this meta-hypothesis
+                            if len(meta_hypotheses_generated) >= n_per_meta:
+                                print(f"🎯 Successfully generated {n_per_meta} accepted hypotheses for meta-hypothesis {meta_idx}. Moving to next meta-hypothesis.")
+                                break
                         else:
                             print(f"❌ Hypothesis rejected for meta-hypothesis {meta_idx}")
 
@@ -1930,15 +1937,21 @@ class EnhancedRAGQuery:
                     print(f"❌ Error generating/critiquing hypothesis: {e}")
                     continue
 
-            print(f"✅ Generated {len(meta_hypotheses_generated)} hypotheses for meta-hypothesis {meta_idx}")
+            # Check if we successfully generated enough accepted hypotheses for this meta-hypothesis
+            if len(meta_hypotheses_generated) < n_per_meta:
+                print(f"⚠️  Warning: Only generated {len(meta_hypotheses_generated)}/{n_per_meta} accepted hypotheses for meta-hypothesis {meta_idx}")
+                print(f"   This may indicate that the meta-hypothesis is too specific or the acceptance criteria are too strict.")
+            else:
+                print(f"✅ Successfully generated {len(meta_hypotheses_generated)}/{n_per_meta} accepted hypotheses for meta-hypothesis {meta_idx}")
+            
             all_hypotheses.extend(meta_hypotheses_generated)
 
         # Summary
         print(f"\n🎉 META-HYPOTHESIS GENERATION COMPLETE")
         print("=" * 80)
         print(f"Total meta-hypotheses processed: {total_meta_hypotheses}")
-        print(f"Total hypotheses generated: {len(all_hypotheses)}")
-        print(f"Average hypotheses per meta-hypothesis: {len(all_hypotheses)/total_meta_hypotheses:.1f}")
+        print(f"Total accepted hypotheses generated: {len(all_hypotheses)}")
+        print(f"Average accepted hypotheses per meta-hypothesis: {len(all_hypotheses)/total_meta_hypotheses:.1f}")
 
         # Final export summary
         if all_hypotheses:
@@ -2321,13 +2334,6 @@ class EnhancedRAGQuery:
         print(f"   - 'randomization': Configure chunk randomization strategy")
         print(f"   - 'test_lab': Test lab paper detection with current query")
         print(f"   💡 Note: Large queries may take longer and use more API calls. Use 'clear' if you get errors.")
-        print(f"   🆕 Dynamic chunk selection: EVERY hypothesis uses completely new chunks from the database!")
-        print(f"   🆕 Source diversity: Ensures balanced selection from pubmed, biorxiv, and medrxiv!")
-        print(f"   🆕 Paper tracking: Automatically avoids reusing the same research papers!")
-        print(f"   🆕 Lab-authored papers: Automatically determines ratio based on available lab papers!")
-        print(f"   🆕 Sophisticated search: Author prioritization, impact factor weighting, citation analysis, and temporal balance!")
-        print(f"   🆕 Enhanced randomization: Multiple strategies to ensure chunk variety!")
-        print(f"   🆕 Meta-hypothesis generator: Creates diverse research directions for comprehensive exploration!")
         print(f"   📚 Default: 1500 chunks per hypothesis generation for richer context!")
         print()
 
@@ -2396,13 +2402,12 @@ class EnhancedRAGQuery:
                         print(f"📚 Using default {chunks_per_meta} chunks per meta-hypothesis")
 
                     print("This will generate 5 diverse research directions, then create hypotheses for each.")
-                    print("This process may take several minutes and use significant API calls.")
                     response = input("Continue? (y/n): ").lower()
                     if response == 'y':
                         try:
-                            results = self.generate_hypotheses_with_meta_generator(meta_query, n_per_meta=3, chunks_per_meta=chunks_per_meta)
+                            results = self.generate_hypotheses_with_meta_generator(meta_query, n_per_meta=5, chunks_per_meta=chunks_per_meta)
                             if results:
-                                print(f"\n✅ Meta-hypothesis generation complete! Generated {len(results)} hypotheses across 5 research directions.")
+                                print(f"\n✅ Meta-hypothesis generation complete! Generated {len(results)} accepted hypotheses across 5 research directions.")
                             else:
                                 print("❌ Meta-hypothesis generation failed.")
                         except Exception as e:
@@ -2595,7 +2600,7 @@ class EnhancedRAGQuery:
                                     source_name = metadata.get('source_name', 'Unknown')
                                     title = metadata.get('title', 'No title')
                                     doi = metadata.get('doi', 'No DOI')
-                                    authors = metadata.get('authors', 'Unknown authors')
+                                    authors = metadata.get('author', metadata.get('authors', 'Unknown authors'))
                                     journal = metadata.get('journal', 'Unknown journal')
                                     # Extract year from publication_date
                                     publication_date = metadata.get('publication_date', '')
@@ -3069,15 +3074,10 @@ class EnhancedRAGQuery:
         lab_name = config.get("lab_name", "Dr. Xiaojing Ma")
 
         # Get author information from metadata
-        authors = metadata.get('authors', '').lower()
+        authors = metadata.get('author', metadata.get('authors', '')).lower()
         if not authors or authors == 'unknown authors':
-            # Try to extract authors from title if not available in metadata
-            from update_chromadb_metadata import extract_authors_from_existing
-            extracted_authors = extract_authors_from_existing(metadata)
-            if extracted_authors and extracted_authors != 'Unknown authors':
-                authors = extracted_authors.lower()
-            else:
-                return False
+            # If no authors found in metadata, return False
+            return False
 
         # Clean author string - remove "et al" and other common patterns
         authors_clean = re.sub(r'\bet\s+al\.?\b', '', authors)  # Remove "et al" or "et al."
@@ -3203,7 +3203,7 @@ class EnhancedRAGQuery:
         
         for result in search_results:
             metadata = result.get('metadata', {})
-            authors = metadata.get('authors', '')
+            authors = metadata.get('author', metadata.get('authors', ''))
             title = metadata.get('title', '')
             
             if self.is_lab_authored_paper(metadata):
@@ -3615,7 +3615,7 @@ class EnhancedRAGQuery:
         if not preferred_authors:
             return False
             
-        authors = metadata.get('authors', '').lower()
+        authors = metadata.get('author', metadata.get('authors', '')).lower()
         if not authors:
             return False
             
@@ -3693,19 +3693,7 @@ def main():
     # Initialize with ChromaDB enabled and fast startup
     rag_system = EnhancedRAGQuery(use_chromadb=True, load_data_at_startup=False)
 
-    # Show new features
-    print("\n" + "=" * 80)
-    print("🎉 NEW FEATURES AVAILABLE:")
-    print("=" * 80)
-    print("⏱️  5-minute timer per hypothesis critique")
-    print("🤖 Automated verdict determination (no manual input)")
-    print("📚 Citation tracking and academic formatting")
-    print("📊 Excel export with comprehensive data")
-    print("📈 Real-time progress tracking")
-    print("🔄 EVERY hypothesis uses completely new chunks for maximum diversity!")
-    print("📄 Paper tracking prevents reusing the same research papers!")
-    print("🎯 Source diversity: Balanced selection from pubmed, biorxiv, and medrxiv!")
-    print("=" * 80)
+
 
     # Run interactive search
     rag_system.interactive_search()
