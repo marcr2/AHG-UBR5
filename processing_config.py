@@ -5,7 +5,7 @@ Adjust these settings based on your system capabilities and API limits.
 
 # --- PARALLEL PROCESSING CONFIGURATION ---
 # Optimized parallel processing configuration
-MAX_WORKERS = 5  # Number of parallel workers for processing
+MAX_WORKERS = 6  # Number of parallel workers for processing
 BATCH_SIZE = 200  # Number of papers to process in each batch
 RATE_LIMIT_DELAY = 0.04  # Delay between requests (seconds) - optimized for 1500 req/min
 REQUEST_TIMEOUT = 60  # Timeout for API requests (seconds)

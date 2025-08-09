@@ -12,6 +12,96 @@ from datetime import datetime
 import time
 from processing_config import get_config, print_config_info
 from chromadb_manager import ChromaDBManager
+import warnings
+
+# Suppress paperscraper warnings
+warnings.filterwarnings("ignore", message="Could not find paper")
+warnings.filterwarnings("ignore", category=UserWarning, module="paperscraper")
+
+# Global counter for citation processing errors
+citation_error_counter = {
+    'doi_lookup_failures': 0,
+    'title_lookup_failures': 0,
+    'total_failures': 0
+}
+
+# Global list to collect papers for batch citation processing
+papers_for_citation_processing = []
+
+def reset_citation_error_counter():
+    """Reset the global citation error counter."""
+    global citation_error_counter
+    citation_error_counter = {
+        'doi_lookup_failures': 0,
+        'title_lookup_failures': 0,
+        'total_failures': 0
+    }
+
+def get_citation_error_summary():
+    """Get a summary of citation processing errors."""
+    global citation_error_counter
+    return citation_error_counter.copy()
+
+def get_papers_for_citation_processing():
+    """Get the global papers_for_citation_processing list."""
+    global papers_for_citation_processing
+    return papers_for_citation_processing
+
+def reset_papers_for_citation_processing():
+    """Reset the global papers collection for batch citation processing."""
+    global papers_for_citation_processing
+    papers_for_citation_processing = []
+
+def add_paper_for_citation_processing(paper_data):
+    """Add a paper to the global collection for batch citation processing."""
+    global papers_for_citation_processing
+    papers_for_citation_processing.append(paper_data)
+
+def process_citations_batch(papers_batch):
+    """Process citations, journal info, and impact factors for a batch of papers."""
+    global citation_error_counter
+    
+    if not papers_batch:
+        return {}
+    
+    print(f"📊 Processing citations for {len(papers_batch)} papers...")
+    
+    results = {}
+    processed_count = 0
+    failed_count = 0
+    
+    for paper_data in papers_batch:
+        idx, row, source = paper_data
+        paper_key = f"{source}_{idx}"
+        
+        try:
+            # Process citation count
+            citation_count = extract_citation_count(row)
+            
+            # Process journal info
+            journal = extract_journal_info(row)
+            
+            # Process impact factor
+            impact_factor = extract_impact_factor(row, journal)
+            
+            results[paper_key] = {
+                'citation_count': citation_count,
+                'journal': journal,
+                'impact_factor': impact_factor
+            }
+            processed_count += 1
+            
+        except Exception as e:
+            failed_count += 1
+            citation_error_counter['total_failures'] += 1
+            results[paper_key] = {
+                'citation_count': 'not found',
+                'journal': 'Unknown journal',
+                'impact_factor': 'not found'
+            }
+    
+    print(f"✅ Citation processing complete: {processed_count} successful, {failed_count} failed")
+    return results
 
 def extract_publication_date(paper_data):
     """Extract publication date from paper data."""
@@ -68,11 +158,24 @@ def extract_publication_date(paper_data):
 
 def extract_citation_count(paper_data):
     """Extract citation count from paper data using paperscraper with robust error handling."""
+    global citation_error_counter
+    
     # First try to get citation count from DOI if available
     doi = paper_data.get('doi', '')
     if doi:
+        # Clean and validate DOI
+        doi = str(doi).strip()
+        if not doi or doi.lower() in ['nan', 'none', 'null', '']:
+            doi = ''
+        else:
+            # Ensure DOI has proper format (should start with 10.)
+            if not doi.startswith('10.'):
+                doi = ''
+    
+    if doi:
         for attempt in range(3):  # Try up to 3 times
             try:
+                # Wrap the entire paperscraper call in a try-except to handle internal library errors
                 citations = get_citations_by_doi(doi)
                 if citations is not None and citations > 0:
                     return str(citations)
@@ -80,24 +183,25 @@ def extract_citation_count(paper_data):
                     # Explicitly return 0 if paperscraper found the paper but it has 0 citations
                     return "0"
             except Exception as e:
-                error_str = str(e).lower()
-                if attempt < 2:  # Don't log on the last attempt
-                    if "captcha" in error_str:
-                        print(f"⚠️  paperscraper DOI lookup attempt {attempt + 1} failed (captcha detected) for {doi}")
-                    elif "session" in error_str or "invalid" in error_str:
-                        print(f"⚠️  paperscraper DOI lookup attempt {attempt + 1} failed (session error) for {doi}")
-                    elif "rate" in error_str or "limit" in error_str:
-                        print(f"⚠️  paperscraper DOI lookup attempt {attempt + 1} failed (rate limited) for {doi}")
-                    else:
-                        print(f"⚠️  paperscraper DOI lookup attempt {attempt + 1} failed for {doi}: {str(e)[:100]}...")
+                # Silently handle errors, just increment counter
+                if attempt == 2:  # Only count on final attempt
+                    citation_error_counter['doi_lookup_failures'] += 1
+                    citation_error_counter['total_failures'] += 1
                 time.sleep(2 + attempt * 2)  # Progressive delay (2s, 4s, 6s)
                 continue
     
     # If no DOI or DOI lookup failed, try title
     title = paper_data.get('title', '')
     if title:
+        # Clean and validate title
+        title = str(title).strip()
+        if not title or title.lower() in ['nan', 'none', 'null', '']:
+            title = ''
+    
+    if title:
         for attempt in range(3):  # Try up to 3 times
             try:
+                # Wrap the entire paperscraper call in a try-except to handle internal library errors
                 citations = get_citations_from_title(title)
                 if citations is not None and citations > 0:
                     return str(citations)
@@ -105,16 +209,10 @@ def extract_citation_count(paper_data):
                     # Explicitly return 0 if paperscraper found the paper but it has 0 citations
                     return "0"
             except Exception as e:
-                error_str = str(e).lower()
-                if attempt < 2:  # Don't log on the last attempt
-                    if "captcha" in error_str:
-                        print(f"⚠️  paperscraper title lookup attempt {attempt + 1} failed (captcha detected) for '{title[:50]}...'")
-                    elif "session" in error_str or "invalid" in error_str:
-                        print(f"⚠️  paperscraper title lookup attempt {attempt + 1} failed (session error) for '{title[:50]}...'")
-                    elif "rate" in error_str or "limit" in error_str:
-                        print(f"⚠️  paperscraper title lookup attempt {attempt + 1} failed (rate limited) for '{title[:50]}...'")
-                    else:
-                        print(f"⚠️  paperscraper title lookup attempt {attempt + 1} failed for '{title[:50]}...': {str(e)[:100]}...")
+                # Silently handle errors, just increment counter
+                if attempt == 2:  # Only count on final attempt
+                    citation_error_counter['title_lookup_failures'] += 1
+                    citation_error_counter['total_failures'] += 1
                 time.sleep(2 + attempt * 2)  # Progressive delay (2s, 4s, 6s)
                 continue
     
@@ -154,16 +252,7 @@ def extract_journal_info(paper_data):
                         # Return the most relevant journal name
                         return results[0]['journal']
                 except Exception as e:
-                    error_str = str(e).lower()
-                    if attempt < 1:  # Don't log on the last attempt
-                        if "captcha" in error_str:
-                            print(f"⚠️  paperscraper journal lookup attempt {attempt + 1} failed (captcha detected) for '{journal_name}'")
-                        elif "session" in error_str or "invalid" in error_str:
-                            print(f"⚠️  paperscraper journal lookup attempt {attempt + 1} failed (session error) for '{journal_name}'")
-                        elif "rate" in error_str or "limit" in error_str:
-                            print(f"⚠️  paperscraper journal lookup attempt {attempt + 1} failed (rate limited) for '{journal_name}'")
-                        else:
-                            print(f"⚠️  paperscraper journal lookup attempt {attempt + 1} failed for '{journal_name}': {str(e)[:100]}...")
+                    # Silently handle errors
                     time.sleep(2 + attempt * 2)  # Progressive delay (2s, 4s)
                     continue
             # If paperscraper failed, return the original journal name
@@ -207,16 +296,7 @@ def extract_impact_factor(paper_data, journal_name=None):
                     if impact_factor > 0:
                         return str(impact_factor)
             except Exception as e:
-                error_str = str(e).lower()
-                if attempt < 1:  # Don't log on the last attempt
-                    if "captcha" in error_str:
-                        print(f"⚠️  paperscraper impact factor lookup attempt {attempt + 1} failed (captcha detected) for '{journal_name}'")
-                    elif "session" in error_str or "invalid" in error_str:
-                        print(f"⚠️  paperscraper impact factor lookup attempt {attempt + 1} failed (session error) for '{journal_name}'")
-                    elif "rate" in error_str or "limit" in error_str:
-                        print(f"⚠️  paperscraper impact factor lookup attempt {attempt + 1} failed (rate limited) for '{journal_name}'")
-                    else:
-                        print(f"⚠️  paperscraper impact factor lookup attempt {attempt + 1} failed for '{journal_name}': {str(e)[:100]}...")
+                # Silently handle errors
                 time.sleep(2 + attempt * 2)  # Progressive delay (2s, 4s)
                 continue
     
@@ -515,6 +595,10 @@ def main():
     print(f"🔧 Using configuration profile: {CONFIG_PROFILE}")
     print_config_info()
     
+    # Reset citation error counter at the start
+    reset_citation_error_counter()
+    reset_papers_for_citation_processing()  # Reset citation processing collection
+    
     # Get search terms from user
     search_terms = get_search_terms()
     print(f"🔍 Search terms: {', '.join(search_terms)}")
@@ -556,6 +640,9 @@ def main():
     total_chunks = 0
     total_embeddings = 0
     
+    # Track papers processed for batch citation processing
+    papers_processed_since_last_citation_batch = 0
+    
     print(f"\n🔄 Processing papers and creating embeddings...")
     with tqdm(total=len(df), desc="Processing papers", unit="paper") as pbar:
         for idx, row in df.iterrows():
@@ -569,14 +656,14 @@ def main():
             else:
                 author = str(authors_raw) if authors_raw else ""
             
-            # Extract core metadata fields
+            # Extract basic metadata fields (without citations/journal/impact factor)
             publication_date = extract_publication_date(row)
-            citation_count = extract_citation_count(row)
-            journal = extract_journal_info(row)
             year = publication_date[:4] if publication_date else str(datetime.now().year)
             
-            # Extract enhanced metadata fields
-            impact_factor = extract_impact_factor(row, journal)
+            # Add paper to batch citation processing collection
+            add_paper_for_citation_processing((idx, row, "pubmed"))
+            
+            # Extract additional metadata fields (without citations/journal/impact factor)
             additional_metadata = extract_additional_metadata(row)
             
             paragraphs = chunk_paragraphs(abstract)
@@ -590,15 +677,15 @@ def main():
                 try:
                     embedding = get_google_embedding(para, api_key)
                     
-                    # Create comprehensive metadata object
+                    # Create comprehensive metadata object (without citations/journal/impact factor)
                     metadata = {
                         "title": title,
                         "doi": doi,
                         "author": author,  # Use author field name for consistency
                         "publication_date": publication_date,
-                        "citation_count": citation_count,
-                        "journal": journal,
-                        "impact_factor": impact_factor,  # New field
+                        "citation_count": "pending",  # Will be updated in batch processing
+                        "journal": "pending",  # Will be updated in batch processing
+                        "impact_factor": "pending",  # Will be updated in batch processing
                         "source": "pubmed",
                         "paper_index": idx,
                         "para_idx": i,
@@ -621,8 +708,43 @@ def main():
                     continue
             
             total_chunks += len(paragraphs)
+            
+            # Increment papers processed counter
+            papers_processed_since_last_citation_batch += 1
+            
+            # Check if we need to process citations in batch (every 1000 papers)
+            if papers_processed_since_last_citation_batch >= 1000:
+                # Process citations for the collected papers
+                citation_results = process_citations_batch(get_papers_for_citation_processing())
+                
+                # Update metadata for all papers in the current batch
+                for result in embeddings_data["metadata"]:
+                    paper_key = f"{result['source']}_{result['paper_index']}"
+                    if paper_key in citation_results:
+                        result['citation_count'] = citation_results[paper_key]['citation_count']
+                        result['journal'] = citation_results[paper_key]['journal']
+                        result['impact_factor'] = citation_results[paper_key]['impact_factor']
+                
+                # Reset the collection
+                reset_papers_for_citation_processing()
+                papers_processed_since_last_citation_batch = 0
+            
             pbar.update(1)
             pbar.set_postfix({"chunks": total_chunks, "embeddings": total_embeddings})
+    
+    # Process any remaining papers for citations
+    citation_results = process_citations_batch(get_papers_for_citation_processing())
+    
+    # Update metadata for all papers in the current batch
+    for result in embeddings_data["metadata"]:
+        paper_key = f"{result['source']}_{result['paper_index']}"
+        if paper_key in citation_results:
+            result['citation_count'] = citation_results[paper_key]['citation_count']
+            result['journal'] = citation_results[paper_key]['journal']
+            result['impact_factor'] = citation_results[paper_key]['impact_factor']
+    
+    # Reset the collection
+    reset_papers_for_citation_processing()
     
     # Update final statistics
     embeddings_data["stats"]["total_chunks"] = total_chunks
@@ -638,9 +760,16 @@ def main():
     print(f"\n🎉 PubMed processing complete!")
     print(f"📊 Total chunks processed: {total_chunks}")
     print(f"📊 Total embeddings created: {total_embeddings}")
-    print(f"📁 Embeddings file: {os.path.abspath(EMBEDDINGS_FILE)}")
-    print(f"📊 File size: {os.path.getsize(EMBEDDINGS_FILE) / 1024:.1f} KB")
-    print(f"🗄️  Embeddings loaded into ChromaDB for RAG queries")
+    
+    # Print citation processing summary
+    citation_summary = get_citation_error_summary()
+    if citation_summary['total_failures'] > 0:
+        print(f"\n📊 Citation Processing Summary:")
+        print(f"   DOI lookup failures: {citation_summary['doi_lookup_failures']}")
+        print(f"   Title lookup failures: {citation_summary['title_lookup_failures']}")
+        print(f"   Total citation processing failures: {citation_summary['total_failures']}")
+    else:
+        print(f"\n✅ All citation lookups completed successfully!")
 
 if __name__ == "__main__":
     main() 
