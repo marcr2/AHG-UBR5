@@ -796,6 +796,7 @@ def record_request():
     request_times.append(time.time())
 
 
+
 # --- CITATION CACHE (for end-of-process enrichment and offline backfill) ---
 CITATION_CACHE = {}
 
@@ -1160,7 +1161,6 @@ def mark_paper_processed(metadata, source, paper_index):
 
 # Remove wait_for_paper_rate_limit and all references to paper_rate_lock, paper_timestamps, paper_rate_event, and related logic
 
-
 def enrich_batch_metadata_from_citations(current_batch, citation_results):
     """Update current_batch metadata entries with citation/journal/impact values when available.
 
@@ -1359,6 +1359,7 @@ def optimized_parallel_process_papers(
                             db_embeddings += 1
                             metadata["total_embeddings"] += 1
                         if len(current_batch["embeddings"]) >= BATCH_SIZE:
+
                             # Enrich current batch metadata before saving the batch to disk
                             try:
                                 citation_results = process_citations_batch(
@@ -1370,6 +1371,7 @@ def optimized_parallel_process_papers(
                             finally:
                                 # Reset the collection to avoid reprocessing the same papers repeatedly
                                 reset_papers_for_citation_processing()
+
                             batch_file = save_batch(
                                 current_batch, db, batch_num, embeddings_dir
                             )
@@ -1414,6 +1416,7 @@ def optimized_parallel_process_papers(
                     reset_papers_for_citation_processing()
                     papers_processed_since_last_citation_batch = 0
 
+
                 if pbar.n % SAVE_INTERVAL == 0 and pbar.n > 0:
                     save_metadata(metadata, embeddings_dir)
                 elapsed = time.time() - start_time
@@ -1431,6 +1434,7 @@ def optimized_parallel_process_papers(
 
     # Process any remaining papers for citations
     citation_results = process_citations_batch(get_papers_for_citation_processing())
+
 
     # Merge into cache and update current batch metadata
     merge_citation_results_into_cache(citation_results)
