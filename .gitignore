@@ -4,6 +4,7 @@ test_metadata.json
 
 # Virtual environments
 AHG/
+.venv/
 
 # Excel files
 hypothesis_export/
