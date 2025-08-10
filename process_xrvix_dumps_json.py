@@ -1,3 +1,4 @@
+import glob
 import os
 import pkg_resources
 import pandas as pd
@@ -795,6 +796,130 @@ def record_request():
     request_times.append(time.time())
 
 
+
+# --- CITATION CACHE (for end-of-process enrichment and offline backfill) ---
+CITATION_CACHE = {}
+
+
+def merge_citation_results_into_cache(citation_results):
+    """Merge results from process_citations_batch into in-memory cache."""
+    global CITATION_CACHE
+    if not citation_results:
+        return
+    for paper_key, stats in citation_results.items():
+        # Store only expected fields as strings
+        if not isinstance(stats, dict):
+            continue
+        entry = CITATION_CACHE.get(paper_key, {})
+        for k in ("citation_count", "journal", "impact_factor"):
+            v = stats.get(k)
+            if v is not None:
+                entry[k] = str(v) if not isinstance(v, str) else v
+        CITATION_CACHE[paper_key] = entry
+
+
+def save_citation_cache(embeddings_dir: str):
+    """Persist the in-memory citation cache to embeddings_dir/citation_cache.json."""
+    try:
+        os.makedirs(embeddings_dir, exist_ok=True)
+        cache_path = os.path.join(embeddings_dir, "citation_cache.json")
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(CITATION_CACHE, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"⚠️  Failed to save citation cache: {e}")
+
+
+def load_citation_cache(embeddings_dir: str):
+    """Load citation cache from disk into memory (merging into existing cache)."""
+    global CITATION_CACHE
+    cache_path = os.path.join(embeddings_dir, "citation_cache.json")
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    for k, v in data.items():
+                        if isinstance(v, dict):
+                            CITATION_CACHE[k] = {**CITATION_CACHE.get(k, {}), **v}
+        except Exception as e:
+            print(f"⚠️  Failed to load citation cache: {e}")
+
+
+def enrich_all_batches_metadata_from_citations(
+    embeddings_dir: str, citation_cache: dict | None = None
+) -> dict:
+    """
+    Sweep all batch_*.json files in embeddings_dir/* and update only 'pending' fields
+    (citation_count, journal, impact_factor) from the provided citation_cache or from
+    embeddings_dir/citation_cache.json if None.
+
+    Returns a stats dict.
+    """
+    if citation_cache is None:
+        # Load from disk if not provided
+        cache_path = os.path.join(embeddings_dir, "citation_cache.json")
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                citation_cache = json.load(f)
+        except Exception:
+            citation_cache = {}
+
+    stats = {"files_scanned": 0, "files_modified": 0, "records_updated": 0}
+    if not citation_cache:
+        print("No citation cache available for enrichment.")
+        return stats
+
+    sources = [
+        d
+        for d in os.listdir(embeddings_dir)
+        if os.path.isdir(os.path.join(embeddings_dir, d))
+    ]
+    for source in sources:
+        source_dir = os.path.join(embeddings_dir, source)
+        batch_files = glob.glob(os.path.join(source_dir, "batch_*.json"))
+        for batch_path in batch_files:
+            stats["files_scanned"] += 1
+            try:
+                with open(batch_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                metas = data.get("metadata", [])
+                modified = False
+                for meta in metas:
+                    paper_key = f"{meta.get('source')}_{meta.get('paper_index')}"
+                    cache_entry = citation_cache.get(paper_key)
+                    if not cache_entry:
+                        print(f"No cache entry for {paper_key}")
+                        continue
+                    if (
+                        meta.get("citation_count") == "pending"
+                        and cache_entry.get("citation_count") is not None
+                    ):
+                        meta["citation_count"] = cache_entry["citation_count"]
+                        modified = True
+                        stats["records_updated"] += 1
+                    if meta.get("journal") == "pending" and cache_entry.get("journal"):
+                        meta["journal"] = cache_entry["journal"]
+                        modified = True
+                        stats["records_updated"] += 1
+                    if meta.get("impact_factor") == "pending" and cache_entry.get(
+                        "impact_factor"
+                    ):
+                        meta["impact_factor"] = cache_entry["impact_factor"]
+                        modified = True
+                        stats["records_updated"] += 1
+                if modified:
+                    with open(batch_path, "w", encoding="utf-8") as f:
+                        json.dump(data, f, indent=2, ensure_ascii=False)
+                    stats["files_modified"] += 1
+            except Exception as e:
+                print(f"⚠️  Failed to enrich {batch_path}: {e}")
+                continue
+    print(
+        f"Enrichment sweep complete. Scanned: {stats['files_scanned']}, Modified: {stats['files_modified']}, Records updated: {stats['records_updated']}"
+    )
+    return stats
+
+
 def get_google_embedding(text, api_key, retry_count=0, skip_base_delay=False):
     """Get embedding with global rate limiting and exponential backoff"""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={api_key}"
@@ -1036,6 +1161,34 @@ def mark_paper_processed(metadata, source, paper_index):
 
 # Remove wait_for_paper_rate_limit and all references to paper_rate_lock, paper_timestamps, paper_rate_event, and related logic
 
+def enrich_batch_metadata_from_citations(current_batch, citation_results):
+    """Update current_batch metadata entries with citation/journal/impact values when available.
+
+    This fills only entries that are still marked as 'pending' to avoid overwriting any pre-filled values.
+    """
+    try:
+        if not current_batch or not citation_results:
+            return
+        meta_list = current_batch.get("metadata", [])
+        for meta in meta_list:
+            paper_key = f"{meta.get('source')}_{meta.get('paper_index')}"
+            paper_stats = citation_results.get(paper_key)
+            if not paper_stats:
+                continue
+            # Only fill if still pending
+            if meta.get("citation_count") == "pending":
+                meta["citation_count"] = paper_stats.get(
+                    "citation_count", meta.get("citation_count")
+                )
+            if meta.get("journal") == "pending":
+                meta["journal"] = paper_stats.get("journal", meta.get("journal"))
+            if meta.get("impact_factor") == "pending":
+                meta["impact_factor"] = paper_stats.get(
+                    "impact_factor", meta.get("impact_factor")
+                )
+    except Exception as e:
+        print(f"⚠️  enrich_batch_metadata_from_citations error: {e}")
+
 
 def sequential_process_papers(
     unprocessed_papers,
@@ -1079,6 +1232,17 @@ def sequential_process_papers(
                         db_embeddings += 1
                         metadata["total_embeddings"] += 1
                     if len(current_batch["embeddings"]) >= BATCH_SIZE:
+                        # Enrich current batch metadata before saving the batch to disk
+                        try:
+                            citation_results = process_citations_batch(
+                                get_papers_for_citation_processing()
+                            )
+                            enrich_batch_metadata_from_citations(
+                                current_batch, citation_results
+                            )
+                        finally:
+                            # Reset the collection to avoid reprocessing the same papers repeatedly
+                            reset_papers_for_citation_processing()
                         batch_file = save_batch(
                             current_batch, db, batch_num, embeddings_dir
                         )
@@ -1108,17 +1272,9 @@ def sequential_process_papers(
                     get_papers_for_citation_processing()
                 )
 
-                # Update metadata for all papers in the current batch
-                for result in current_batch["metadata"]:
-                    paper_key = f"{result['source']}_{result['paper_index']}"
-                    if paper_key in citation_results:
-                        result["citation_count"] = citation_results[paper_key][
-                            "citation_count"
-                        ]
-                        result["journal"] = citation_results[paper_key]["journal"]
-                        result["impact_factor"] = citation_results[paper_key][
-                            "impact_factor"
-                        ]
+                # Merge into cache and update current batch metadata
+                merge_citation_results_into_cache(citation_results)
+                enrich_batch_metadata_from_citations(current_batch, citation_results)
 
                 # Reset the collection
                 reset_papers_for_citation_processing()
@@ -1131,13 +1287,9 @@ def sequential_process_papers(
     # Process any remaining papers for citations
     citation_results = process_citations_batch(get_papers_for_citation_processing())
 
-    # Update metadata for all papers in the current batch
-    for result in current_batch["metadata"]:
-        paper_key = f"{result['source']}_{result['paper_index']}"
-        if paper_key in citation_results:
-            result["citation_count"] = citation_results[paper_key]["citation_count"]
-            result["journal"] = citation_results[paper_key]["journal"]
-            result["impact_factor"] = citation_results[paper_key]["impact_factor"]
+    # Merge into cache and update current batch metadata
+    merge_citation_results_into_cache(citation_results)
+    enrich_batch_metadata_from_citations(current_batch, citation_results)
 
     # Reset the collection
     reset_papers_for_citation_processing()
@@ -1207,6 +1359,19 @@ def optimized_parallel_process_papers(
                             db_embeddings += 1
                             metadata["total_embeddings"] += 1
                         if len(current_batch["embeddings"]) >= BATCH_SIZE:
+
+                            # Enrich current batch metadata before saving the batch to disk
+                            try:
+                                citation_results = process_citations_batch(
+                                    get_papers_for_citation_processing()
+                                )
+                                enrich_batch_metadata_from_citations(
+                                    current_batch, citation_results
+                                )
+                            finally:
+                                # Reset the collection to avoid reprocessing the same papers repeatedly
+                                reset_papers_for_citation_processing()
+
                             batch_file = save_batch(
                                 current_batch, db, batch_num, embeddings_dir
                             )
@@ -1241,21 +1406,16 @@ def optimized_parallel_process_papers(
                         get_papers_for_citation_processing()
                     )
 
-                    # Update metadata for all papers in the current batch
-                    for result in current_batch["metadata"]:
-                        paper_key = f"{result['source']}_{result['paper_index']}"
-                        if paper_key in citation_results:
-                            result["citation_count"] = citation_results[paper_key][
-                                "citation_count"
-                            ]
-                            result["journal"] = citation_results[paper_key]["journal"]
-                            result["impact_factor"] = citation_results[paper_key][
-                                "impact_factor"
-                            ]
+                    # Merge into cache and update current batch metadata
+                    merge_citation_results_into_cache(citation_results)
+                    enrich_batch_metadata_from_citations(
+                        current_batch, citation_results
+                    )
 
-                        # Reset the collection
-                        reset_papers_for_citation_processing()
-                        papers_processed_since_last_citation_batch = 0
+                    # Reset the collection
+                    reset_papers_for_citation_processing()
+                    papers_processed_since_last_citation_batch = 0
+
 
                 if pbar.n % SAVE_INTERVAL == 0 and pbar.n > 0:
                     save_metadata(metadata, embeddings_dir)
@@ -1275,13 +1435,10 @@ def optimized_parallel_process_papers(
     # Process any remaining papers for citations
     citation_results = process_citations_batch(get_papers_for_citation_processing())
 
-    # Update metadata for all papers in the current batch
-    for result in current_batch["metadata"]:
-        paper_key = f"{result['source']}_{result['paper_index']}"
-        if paper_key in citation_results:
-            result["citation_count"] = citation_results[paper_key]["citation_count"]
-            result["journal"] = citation_results[paper_key]["journal"]
-            result["impact_factor"] = citation_results[paper_key]["impact_factor"]
+
+    # Merge into cache and update current batch metadata
+    merge_citation_results_into_cache(citation_results)
+    enrich_batch_metadata_from_citations(current_batch, citation_results)
 
     # Reset the collection
     reset_papers_for_citation_processing()
@@ -1846,6 +2003,18 @@ def main():
 
             # Save any remaining embeddings in the current batch
             if current_batch["embeddings"]:
+                # Enrich from latest cached citations before saving
+                try:
+                    # We may have residual papers in the collection
+                    citation_results = process_citations_batch(
+                        get_papers_for_citation_processing()
+                    )
+                    merge_citation_results_into_cache(citation_results)
+                    enrich_batch_metadata_from_citations(
+                        current_batch, citation_results
+                    )
+                finally:
+                    reset_papers_for_citation_processing()
                 batch_file = save_batch(current_batch, db, batch_num, EMBEDDINGS_DIR)
                 metadata["batches"][f"{db}_batch_{batch_num:04d}"] = {
                     "file": batch_file,
@@ -1877,6 +2046,14 @@ def main():
             )
             print(f"⏱️  Processing time: {processing_time/3600:.1f} hours")
             print(f"🚀 Processing rate: {papers_per_second:.1f} papers/second")
+
+        # Persist citation cache for backfill/enrichment reuse
+        save_citation_cache(EMBEDDINGS_DIR)
+
+        # End-of-process enrichment sweep to ensure all batches have final data
+        enrich_all_batches_metadata_from_citations(
+            EMBEDDINGS_DIR, citation_cache=CITATION_CACHE
+        )
 
         # Print final statistics
         print(f"\n🎉 All dumps processed!")
