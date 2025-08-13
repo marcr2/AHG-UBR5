@@ -22,16 +22,17 @@ def is_ubr5_related(text: str) -> bool:
 
 def validate_hypothesis_format(hypothesis: str) -> tuple[bool, str]:
     """
-    Validate that a hypothesis contains both required sections.
+    Validate that a hypothesis contains all three required sections.
     
     Returns:
         tuple: (is_valid: bool, reason: str)
     """
     hypothesis_lower = hypothesis.lower()
     
-    # Check for hypothesis statement section
-    has_hypothesis_statement = any(phrase in hypothesis_lower for phrase in [
-        'hypothesis statement',
+    # Check for hypothesis section
+    has_hypothesis = any(phrase in hypothesis_lower for phrase in [
+        '1. hypothesis',
+        '1. hypothesis:',
         'hypothesis:',
         'hypothesis ',
         'we hypothesize',
@@ -41,9 +42,12 @@ def validate_hypothesis_format(hypothesis: str) -> tuple[bool, str]:
         'the hypothesis'
     ])
     
-    # Check for experimental approach section
-    has_experimental_approach = any(phrase in hypothesis_lower for phrase in [
-        'experimental approach',
+    # Check for experimental design section
+    has_experimental_design = any(phrase in hypothesis_lower for phrase in [
+        '2. experimental design',
+        '2. experimental design:',
+        'experimental design:',
+        'experimental design ',
         'experimental design',
         'methods',
         'methodology',
@@ -60,14 +64,30 @@ def validate_hypothesis_format(hypothesis: str) -> tuple[bool, str]:
         'to study'
     ])
     
-    if not has_hypothesis_statement and not has_experimental_approach:
-        return False, "Missing both hypothesis statement and experimental approach sections"
-    elif not has_hypothesis_statement:
-        return False, "Missing hypothesis statement section"
-    elif not has_experimental_approach:
-        return False, "Missing experimental approach section"
+    # Check for rationale section
+    has_rationale = any(phrase in hypothesis_lower for phrase in [
+        '3. rationale',
+        '3. rationale:',
+        'rationale:',
+        'rationale ',
+        'reasoning',
+        'scientific basis',
+        'basis for',
+        'because',
+        'since',
+        'as'
+    ])
+    
+    if not has_hypothesis and not has_experimental_design and not has_rationale:
+        return False, "Missing all three required sections: hypothesis, experimental design, and rationale"
+    elif not has_hypothesis:
+        return False, "Missing hypothesis section"
+    elif not has_experimental_design:
+        return False, "Missing experimental design section"
+    elif not has_rationale:
+        return False, "Missing rationale section"
     else:
-        return True, "Format validation passed"
+        return True, "Format validation passed - all three sections present"
 
 class MetaHypothesisGenerator:
     """
@@ -168,48 +188,38 @@ class HypothesisGenerator:
         lab_name = config.get("lab_name", "Dr. Xiaojing Ma")
         institution = config.get("institution", "Weill Cornell Medicine")
         
-        prompt = f"""
-# Scientific Hypothesis Generator
+        prompt = f"""Your task is to formulate {n} scientific hypotheses and experimental designs based on provided source materials ("chunks"). Follow these rules precisely:
 
-## Role
+1. **Vary Source Chunks:** For each new hypothesis, you must select a different and non-overlapping set of source chunks to use as evidence.
+2. **Cite All Sources:** You are forbidden from generating a hypothesis, rationale, or experimental design without citing the specific source chunks that informed your response.
+3. **Adhere to Format:** Your final output must strictly follow this exact template. If any section is incomplete or missing, you must reject the response and try again until it meets the format.
+
+<output_format>
+1. Hypothesis
+[Formulate a clear hypothesis, citing all relevant source chunks.]
+
+2. Experimental Design
+[Propose a brief, plausible experiment to test the hypothesis.]
+
+3. Rationale
+[Explain the reasoning and scientific basis for the hypothesis, citing all relevant source chunks.]
+</output_format>
+
+## Context
 You are a molecular biology research specialist with expertise in UBR-5 protein research, working within the context of {lab_name}'s laboratory at {institution}.
 
-## Task
-Based on the provided literature context, generate {n} novel, scientifically sound hypotheses related to UBR-5 protein function, regulation, or therapeutic applications.
-
-## CRITICAL OUTPUT FORMAT REQUIREMENTS
-Each hypothesis MUST include BOTH of the following sections:
-
-1. **Hypothesis Statement**: A clear, testable hypothesis about UBR-5 (e.g., "We hypothesize that...", "Our hypothesis is that...", "The hypothesis is that...")
-2. **Experimental Approach**: Specific methods and techniques to test the hypothesis (e.g., "To test this hypothesis, we will...", "Our experimental approach involves...", "We propose to investigate this by...")
-
-Additional sections (optional but recommended):
-3. **Rationale**: Scientific basis and reasoning for the hypothesis
-4. **Expected Outcomes**: What results would support or refute the hypothesis
-5. **Significance**: Potential impact on understanding UBR-5 biology or therapeutic development
-
-## Requirements
-- Each hypothesis MUST contain both Hypothesis Statement AND Experimental Approach sections
-- Each hypothesis should be complete and self-contained
-- Focus on mechanistic insights and therapeutic applications
-- Ensure hypotheses are testable with current laboratory techniques
-- Maintain scientific rigor and accuracy
-- Each hypothesis should be 200-400 words
-- Stay within character limits for API compatibility
-
-## Literature Context
+## Source Materials
 {context}
 
 ## Generated Hypotheses
-
-"""
+Generate exactly {n} hypotheses following the format above."""
         return prompt
 
     def generate(self, context_chunks: List[str], n: int = 3) -> List[str]:
         prompt = self.build_prompt(context_chunks, n)
         if not self.model:
-            # Fallback placeholder
-            return [f"Hypothesis {i+1} about UBR-5 (see prompt for details)." for i in range(n)]
+            # Fallback placeholder in new format
+            return [f"1. Hypothesis: UBR-5 regulates protein stability in cellular pathways.\n\n2. Experimental Design: We will analyze UBR-5 knockout effects on protein degradation.\n\n3. Rationale: UBR-5 is an E3 ubiquitin ligase involved in protein turnover." for i in range(n)]
         
         try:
             response = self.model.models.generate_content(
@@ -231,7 +241,7 @@ Additional sections (optional but recommended):
                     is_valid_format, format_reason = validate_hypothesis_format(hyp)
                     if is_valid_format:
                         valid_hypotheses.append(hyp)
-                        print(f"[HypothesisGenerator.generate] Hypothesis {i+1} length: {len(hyp)} characters - FORMAT VALID")
+                        print(f"[HypothesisGenerator.generate] Hypothesis {i+1} length: {len(hyp)} characters - FORMAT VALID (3 sections)")
                     else:
                         print(f"[HypothesisGenerator.generate] Hypothesis {i+1} REJECTED: {format_reason}")
                 else:
@@ -239,8 +249,8 @@ Additional sections (optional but recommended):
             
             if not valid_hypotheses:
                 print(f"[HypothesisGenerator.generate] WARNING: No valid hypotheses generated. Raw text preview: {text[:200]}...")
-                # Return a fallback hypothesis
-                return [f"Generated hypothesis about UBR-5 based on provided literature context. Raw response: {text[:500]}..."]
+                # Return a fallback hypothesis in the new format
+                return [f"1. Hypothesis: UBR-5 plays a critical role in protein ubiquitination pathways based on provided literature context.\n\n2. Experimental Design: To test this hypothesis, we will examine UBR-5 expression and activity in cellular models.\n\n3. Rationale: The literature suggests UBR-5 is involved in protein degradation and regulation processes."]
             
             return valid_hypotheses
             
@@ -249,8 +259,9 @@ Additional sections (optional but recommended):
             return [f"Error generating hypothesis: {e}"]
 
     def _parse_hypotheses(self, text: str, n: int) -> List[str]:
-        # First try to parse numbered hypotheses from LLM output
-        pattern = re.compile(r"\n?\s*(\d+)\.\s+(.*?)(?=\n\s*\d+\.|$)", re.DOTALL)
+        # First try to parse numbered hypotheses from LLM output with the new format
+        # Look for patterns like "1. Hypothesis", "2. Experimental Design", "3. Rationale"
+        pattern = re.compile(r"\n?\s*(\d+)\.\s+(?:Hypothesis|Experimental Design|Rationale)\s*:?\s*(.*?)(?=\n\s*\d+\.|$)", re.DOTALL)
         matches = pattern.findall(text)
         
         if matches and len(matches) >= n:
@@ -267,7 +278,17 @@ Additional sections (optional but recommended):
                     cleaned_hypotheses.append(hyp)
             return cleaned_hypotheses[:n]
         
-        # Fallback: try to split by common section markers
+        # Fallback: try to split by the new section markers
+        if "Hypothesis" in text and "Experimental Design" in text and "Rationale" in text:
+            # Split by the new section markers
+            sections = re.split(r'\n\s*(?:1\.\s*Hypothesis|2\.\s*Experimental Design|3\.\s*Rationale)\s*:?\s*', text)
+            if len(sections) > 1:
+                # Take the first substantial section as the hypothesis
+                hypothesis = sections[0].strip()
+                if len(hypothesis) > 50:
+                    return [hypothesis]
+        
+        # Additional fallback: try to split by common section markers
         if "Hypothesis Statement" in text or "Rationale" in text:
             # Split by potential section markers
             sections = re.split(r'\n\s*(?:Hypothesis Statement|Rationale|Experimental Approach|Expected Outcomes|Significance)\s*:', text)

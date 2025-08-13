@@ -2,9 +2,15 @@ import glob
 import os
 import pkg_resources
 import pandas as pd
-from paperscraper.xrxiv.xrxiv_query import XRXivQuery
-from paperscraper.citations import get_citations_from_title, get_citations_by_doi
-from paperscraper.impact import Impactor
+# Optional imports for paperscraper (fallback if not available)
+try:
+    from paperscraper.xrxiv.xrxiv_query import XRXivQuery
+    from paperscraper.citations import get_citations_from_title, get_citations_by_doi
+    from paperscraper.impact import Impactor
+    PAPERSCRAPER_AVAILABLE = True
+except ImportError:
+    PAPERSCRAPER_AVAILABLE = False
+    print("⚠️  paperscraper not available - using alternative APIs only")
 import requests
 import json
 import re
@@ -75,7 +81,13 @@ warnings.filterwarnings(
 # 4. Increased delays between requests to be more respectful to Google Scholar
 # 5. Reduced retry attempts to avoid overwhelming the service
 
-import matplotlib.pyplot as plt
+# Optional import for matplotlib (used for plotting)
+try:
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    print("⚠️  matplotlib not available - plotting features disabled")
 
 
 def extract_publication_date(paper_data):
@@ -141,51 +153,46 @@ def extract_publication_date(paper_data):
 
 
 def extract_impact_factor(paper_data, journal_name=None):
-    """Extract or calculate impact factor from paper data using paperscraper with robust error handling."""
-    # Suppress all warnings for this function
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    """Extract impact factor using multiple reliable APIs and databases."""
+    # First, try to get impact factor directly from the data
+    impact_fields = [
+        "impact_factor", "journal_impact_factor", "if", "jif",
+        "impact", "journal_if", "journal_impact"
+    ]
 
-        # First, try to get impact factor directly from the data
-        impact_fields = [
-            "impact_factor",
-            "journal_impact_factor",
-            "if",
-            "jif",
-            "impact",
-            "journal_if",
-            "journal_impact",
-        ]
+    for field in impact_fields:
+        if field in paper_data and paper_data[field] is not None:
+            try:
+                impact = float(paper_data[field])
+                return str(max(0, impact))
+            except (ValueError, TypeError):
+                continue
 
-        for field in impact_fields:
-            if field in paper_data and paper_data[field] is not None:
-                try:
-                    impact = float(paper_data[field])
-                    return str(max(0, impact))
-                except (ValueError, TypeError):
-                    continue
+    # If no direct impact factor, try to get it from APIs
+    if not journal_name:
+        journal_name = extract_journal_info(paper_data)
 
-        # If no direct impact factor, try to get it using paperscraper
-        if not journal_name:
-            journal_name = extract_journal_info(paper_data)
+    if journal_name and journal_name != "Unknown journal":
+        # Try to get impact factor from CrossRef API
+        doi = paper_data.get("doi", "")
+        if doi:
+            impact_factor = get_impact_factor_crossref(doi)
+            if impact_factor is not None:
+                return str(impact_factor)
+        
+        # Try to get impact factor from PubMed Central API
+        if doi:
+            impact_factor = get_impact_factor_pubmed_central(doi)
+            if impact_factor is not None:
+                return str(impact_factor)
+        
+        # Try to get impact factor from journal name using CrossRef
+        impact_factor = get_impact_factor_by_journal_crossref(journal_name)
+        if impact_factor is not None:
+            return str(impact_factor)
 
-        if journal_name and journal_name != "Unknown journal":
-            for attempt in range(2):  # Try up to 2 times
-                try:
-                    impactor = Impactor()
-                    results = impactor.search(journal_name, threshold=85)
-                    if results:
-                        # Return the impact factor of the most relevant match
-                        impact_factor = results[0].get("factor", 0)
-                        if impact_factor > 0:
-                            return str(impact_factor)
-                except Exception as e:
-                    # Silently handle errors
-                    time.sleep(2 + attempt * 2)  # Progressive delay (2s, 4s)
-                    continue
-
-        # Fallback to the old estimation method
-        return estimate_impact_factor(journal_name)
+    # Fallback to the estimation method
+    return estimate_impact_factor(journal_name)
 
 
 def estimate_impact_factor(journal_name):
@@ -349,6 +356,9 @@ citation_error_counter = {
 # Global list to collect papers for batch citation processing
 papers_for_citation_processing = []
 
+# Simple citation cache to avoid re-processing
+CITATION_CACHE = {}
+
 
 def reset_citation_error_counter():
     """Reset the global citation error counter."""
@@ -384,226 +394,710 @@ def add_paper_for_citation_processing(paper_data):
     papers_for_citation_processing.append(paper_data)
 
 
+def get_cached_citation(paper_key):
+    """Get citation from cache if available."""
+    global CITATION_CACHE
+    return CITATION_CACHE.get(paper_key)
+
+
+def cache_citation(paper_key, citation_data):
+    """Cache citation data for reuse."""
+    global CITATION_CACHE
+    CITATION_CACHE[paper_key] = citation_data
+
+
+def clear_citation_cache():
+    """Clear the citation cache."""
+    global CITATION_CACHE
+    CITATION_CACHE.clear()
+
+
 def process_citations_batch(papers_batch):
-    """Process citations, journal info, and impact factors for a batch of papers."""
+    """Process citations in parallel with smart fallbacks for maximum speed and reliability."""
     global citation_error_counter
 
     if not papers_batch:
         return {}
 
-    print(f"📊 Processing citations for {len(papers_batch)} papers...")
+    print(f"📊 Processing citations for {len(papers_batch)} papers in parallel...")
 
     results = {}
     processed_count = 0
     failed_count = 0
 
-    # Use tqdm progress bar for citation processing
-    with tqdm(
-        total=len(papers_batch), desc="Processing citations", unit="paper", leave=False
-    ) as pbar:
-        # Suppress warnings during citation processing
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+    def process_single_paper(paper_data):
+        """Process a single paper's citations with smart fallback strategy."""
+        idx, row, source = paper_data
+        paper_key = f"{source}_{idx}"
+        
+        # Check cache first (fastest)
+        cached_result = get_cached_citation(paper_key)
+        if cached_result:
+            return paper_key, cached_result
+        
+        try:
+            # Strategy 1: Check if citation data is already in the paper_data (fastest)
+            citation_fields = [
+                "citations", "citation_count", "cited_by_count", "times_cited",
+                "reference_count", "cited_count", "num_citations", "citedByCount"
+            ]
+            
+            for field in citation_fields:
+                if field in row and row[field] is not None:
+                    try:
+                        count = int(row[field])
+                        if count >= 0:
+                            result = {
+                                "citation_count": str(count),
+                                "journal": extract_journal_info_fast(row),
+                                "impact_factor": extract_impact_factor_fast(row),
+                            }
+                            # Cache the result for future use
+                            cache_citation(paper_key, result)
+                            return paper_key, result
+                    except (ValueError, TypeError):
+                        continue
 
-            for paper_data in papers_batch:
-                idx, row, source = paper_data
-                paper_key = f"{source}_{idx}"
-
+            # Strategy 2: Try DOI-based lookup (most reliable)
+            doi = row.get("doi", "")
+            if doi and str(doi).strip().startswith("10."):
+                # Try OpenCitations API first (fastest)
                 try:
-                    # Process citation count with timeout
-                    citation_count = extract_citation_count(row)
+                    citations = get_citations_opencitations(doi)
+                    if citations is not None:
+                        result = {
+                            "citation_count": str(citations),
+                            "journal": extract_journal_info_fast(row),
+                            "impact_factor": extract_impact_factor_fast(row),
+                        }
+                        # Cache the result for future use
+                        cache_citation(paper_key, result)
+                        return paper_key, result
+                except Exception:
+                    pass
+                
+                # Try PubMed Central API as fallback
+                try:
+                    citations = get_citations_pubmed_central(doi)
+                    if citations is not None:
+                        result = {
+                            "citation_count": str(citations),
+                            "journal": extract_journal_info_fast(row),
+                            "impact_factor": extract_impact_factor_fast(row),
+                        }
+                        # Cache the result for future use
+                        cache_citation(paper_key, result)
+                        return paper_key, result
+                except Exception:
+                    pass
 
-                    # Process journal info
-                    journal = extract_journal_info(row)
+            # Strategy 3: Title-based lookup (least reliable but catches edge cases)
+            title = row.get("title", "")
+            if title and len(str(title).strip()) >= 10:
+                try:
+                    citations = get_citations_pubmed_central_by_title(title)
+                    if citations is not None:
+                        result = {
+                            "citation_count": str(citations),
+                            "journal": extract_journal_info_fast(row),
+                            "impact_factor": extract_impact_factor_fast(row),
+                        }
+                        # Cache the result for future use
+                        cache_citation(paper_key, result)
+                        return paper_key, result
+                except Exception:
+                    pass
 
-                    # Process impact factor
-                    impact_factor = extract_impact_factor(row, journal)
+            # Strategy 4: Final fallback - check for any citation-related fields
+            for field in row.keys():
+                if "citation" in field.lower() or "cited" in field.lower():
+                    try:
+                        value = row[field]
+                        if isinstance(value, (int, float)) and value >= 0:
+                            result = {
+                                "citation_count": str(int(value)),
+                                "journal": extract_journal_info_fast(row),
+                                "impact_factor": extract_impact_factor_fast(row),
+                            }
+                            # Cache the result for future use
+                            cache_citation(paper_key, result)
+                            return paper_key, result
+                        elif isinstance(value, str):
+                            import re
+                            numbers = re.findall(r"\d+", value)
+                            if numbers:
+                                result = {
+                                    "citation_count": str(int(numbers[0])),
+                                    "journal": extract_journal_info_fast(row),
+                                    "impact_factor": extract_impact_factor_fast(row),
+                                }
+                                # Cache the result for future use
+                                cache_citation(paper_key, result)
+                                return paper_key, result
+                    except (ValueError, TypeError):
+                        continue
 
-                    results[paper_key] = {
-                        "citation_count": citation_count,
-                        "journal": journal,
-                        "impact_factor": impact_factor,
-                    }
-                    processed_count += 1
+            # If all strategies fail, return default values
+            result = {
+                "citation_count": "not found",
+                "journal": "Unknown journal",
+                "impact_factor": "not found",
+            }
+            # Cache the result to avoid re-processing
+            cache_citation(paper_key, result)
+            return paper_key, result
 
+        except Exception as e:
+            # Log the error but don't fail the entire batch
+            result = {
+                "citation_count": "not found",
+                "journal": "Unknown journal",
+                "impact_factor": "not found",
+            }
+            # Cache the result to avoid re-processing
+            cache_citation(paper_key, result)
+            return paper_key, result
+
+    # Process papers in parallel with optimized worker count
+    from processing_config import CITATION_MAX_WORKERS, CITATION_TIMEOUT
+    max_workers = min(CITATION_MAX_WORKERS, len(papers_batch))  # Use config value
+    
+    with tqdm(
+        total=len(papers_batch), 
+        desc="Processing citations", 
+        unit="paper", 
+        leave=False
+    ) as pbar:
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all papers for parallel processing
+            future_to_paper = {
+                executor.submit(process_single_paper, paper_data): paper_data 
+                for paper_data in papers_batch
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_paper):
+                try:
+                    paper_key, result = future.result(timeout=CITATION_TIMEOUT)  # Use config timeout
+                    results[paper_key] = result
+                    
+                    if result["citation_count"] != "not found":
+                        processed_count += 1
+                    else:
+                        failed_count += 1
+                        
                 except Exception as e:
-                    failed_count += 1
-                    citation_error_counter["total_failures"] += 1
+                    # Handle timeout or other errors
+                    paper_data = future_to_paper[future]
+                    paper_key = f"{paper_data[2]}_{paper_data[0]}"
                     results[paper_key] = {
                         "citation_count": "not found",
                         "journal": "Unknown journal",
                         "impact_factor": "not found",
                     }
-
-                # Update progress bar with more detailed information
+                    failed_count += 1
+                
+                # Update progress bar
                 pbar.update(1)
-                pbar.set_postfix(
-                    {
-                        "success": processed_count,
-                        "failed": failed_count,
-                        "rate": f"{processed_count + failed_count}/s",
-                        "progress": f"{processed_count + failed_count}/{len(papers_batch)}",
-                    }
-                )
+                pbar.set_postfix({
+                    "success": processed_count,
+                    "failed": failed_count,
+                    "workers": max_workers,
+                    "rate": f"{processed_count + failed_count}/s"
+                })
 
-                # Add a small delay to prevent overwhelming the API
-                time.sleep(0.1)
-
-    print(
-        f"✅ Citation processing complete: {processed_count} successful, {failed_count} failed"
-    )
+    print(f"✅ Citation processing complete: {processed_count} successful, {failed_count} failed")
     return results
 
 
+def get_citations_opencitations(doi):
+    """Get citation count from OpenCitations API (fast and reliable)."""
+    try:
+        # Clean DOI
+        doi = str(doi).strip()
+        if not doi or not doi.startswith("10."):
+            return None
+            
+        # OpenCitations API endpoint for citations
+        url = f"https://opencitations.net/index/coci/api/v1/citations/{doi}"
+        response = requests.get(url, timeout=3)  # Reduced from 10s to 3s
+        
+        if response.status_code == 200:
+            data = response.json()
+            if isinstance(data, list):
+                return len(data)  # Count of papers that cite this one
+            else:
+                return 0
+        else:
+            return None
+            
+    except Exception:
+        return None
+
+def get_citations_pubmed_central(doi):
+    """Get citation count from PubMed Central API."""
+    try:
+        # Clean DOI
+        doi = str(doi).strip()
+        if not doi or not doi.startswith("10."):
+            return None
+            
+        # PubMed Central API endpoint
+        url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+        params = {
+            "db": "pmc",
+            "term": doi,
+            "retmode": "json",
+            "retmax": 1
+        }
+        
+        response = requests.get(url, params=params, timeout=3)  # Reduced from 10s to 3s
+        if response.status_code == 200:
+            data = response.json()
+            if "esearchresult" in data and "count" in data["esearchresult"]:
+                count = int(data["esearchresult"]["count"])
+                return count
+        return None
+        
+    except Exception:
+        return None
+
+def get_citations_pubmed_central_by_title(title):
+    """Get citation count from PubMed Central API using title search."""
+    try:
+        # Clean title
+        title = str(title).strip()
+        if not title or len(title) < 10:
+            return None
+            
+        # PubMed Central API endpoint for title search
+        url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+        params = {
+            "db": "pmc",
+            "term": f'"{title}"[Title]',
+            "retmode": "json",
+            "retmax": 1
+        }
+        
+        response = requests.get(url, params=params, timeout=3)  # Reduced from 10s to 3s
+        if response.status_code == 200:
+            data = response.json()
+            if "esearchresult" in data and "count" in data["esearchresult"]:
+                count = int(data["esearchresult"]["count"])
+                return count
+        return None
+        
+    except Exception:
+        return None
+
+def get_journal_info_crossref(doi):
+    """Get enhanced journal information from CrossRef API."""
+    try:
+        # Clean DOI
+        doi = str(doi).strip()
+        if not doi or not doi.startswith("10."):
+            return None
+            
+        # CrossRef API endpoint
+        url = f"https://api.crossref.org/works/{doi}"
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            work = data.get("message", {})
+            
+            # Get journal title
+            journal_title = work.get("container-title", [None])[0]
+            if journal_title:
+                return journal_title
+                
+            # Get publication venue
+            venue = work.get("venue", [None])[0]
+            if venue:
+                return venue
+                
+        return None
+        
+    except Exception:
+        return None
+
+def get_journal_info_pubmed_central(doi):
+    """Get enhanced journal information from PubMed Central API."""
+    try:
+        # Clean DOI
+        doi = str(doi).strip()
+        if not doi or not doi.startswith("10."):
+            return None
+            
+        # PubMed Central API endpoint
+        url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+        params = {
+            "db": "pmc",
+            "id": doi,
+            "retmode": "json"
+        }
+        
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if "result" in data and doi in data["result"]:
+                paper_data = data["result"][doi]
+                journal = paper_data.get("fulljournalname", paper_data.get("journal", None))
+                if journal:
+                    return journal
+                    
+        return None
+        
+    except Exception:
+        return None
+
+def get_impact_factor_crossref(doi):
+    """Get impact factor from CrossRef API metadata."""
+    try:
+        # Clean DOI
+        doi = str(doi).strip()
+        if not doi or not doi.startswith("10."):
+            return None
+            
+        # CrossRef API endpoint
+        url = f"https://api.crossref.org/works/{doi}"
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            work = data.get("message", {})
+            
+            # Look for impact factor in various metadata fields
+            # Note: CrossRef doesn't directly provide impact factors, but we can look for
+            # journal information that might help with estimation
+            journal_title = work.get("container-title", [None])[0]
+            if journal_title:
+                # Try to get impact factor from our estimation database
+                return estimate_impact_factor(journal_title)
+                
+        return None
+        
+    except Exception:
+        return None
+
+def get_impact_factor_pubmed_central(doi):
+    """Get impact factor from PubMed Central API metadata."""
+    try:
+        # Clean DOI
+        doi = str(doi).strip()
+        if not doi or not doi.startswith("10."):
+            return None
+            
+        # PubMed Central API endpoint
+        url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+        params = {
+            "db": "pmc",
+            "id": doi,
+            "retmode": "json"
+        }
+        
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if "result" in data and doi in data["result"]:
+                paper_data = data["result"][doi]
+                journal = paper_data.get("fulljournalname", paper_data.get("journal", None))
+                if journal:
+                    # Try to get impact factor from our estimation database
+                    return estimate_impact_factor(journal)
+                    
+        return None
+        
+    except Exception:
+        return None
+
+def get_impact_factor_by_journal_crossref(journal_name):
+    """Get impact factor by searching CrossRef for journal information."""
+    try:
+        # Clean journal name
+        journal_name = str(journal_name).strip()
+        if not journal_name or journal_name == "Unknown journal":
+            return None
+            
+        # CrossRef API endpoint for journal search
+        url = f"https://api.crossref.org/journals"
+        params = {
+            "query": journal_name,
+            "rows": 1
+        }
+        
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            items = data.get("message", {}).get("items", [])
+            if items:
+                # Try to get impact factor from our estimation database
+                return estimate_impact_factor(journal_name)
+                
+        return None
+        
+    except Exception:
+        return None
+
+def extract_authors_enhanced(paper_data):
+    """Extract enhanced author information using multiple APIs."""
+    # First check if author data is already in the paper_data
+    author_fields = [
+        "authors", "author", "creator", "contributors", "author_list"
+    ]
+    
+    for field in author_fields:
+        if field in paper_data and paper_data[field]:
+            authors = paper_data[field]
+            if isinstance(authors, str) and authors.strip():
+                return authors
+            elif isinstance(authors, list) and authors:
+                return "; ".join([str(a) for a in authors if a])
+    
+    # Try to get enhanced author info from DOI using CrossRef API
+    doi = paper_data.get("doi", "")
+    if doi:
+        enhanced_authors = get_authors_crossref(doi)
+        if enhanced_authors:
+            return enhanced_authors
+        
+        enhanced_authors = get_authors_pubmed_central(doi)
+        if enhanced_authors:
+            return enhanced_authors
+    
+    # Fallback to source field
+    source = paper_data.get("source", "")
+    if source in ["biorxiv", "medrxiv"]:
+        return f"Authors from {source.upper()}"
+    
+    return "Unknown authors"
+
+def get_authors_crossref(doi):
+    """Get author information from CrossRef API."""
+    try:
+        # Clean DOI
+        doi = str(doi).strip()
+        if not doi or not doi.startswith("10."):
+            return None
+            
+        # CrossRef API endpoint
+        url = f"https://api.crossref.org/works/{doi}"
+        response = requests.get(url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            work = data.get("message", {})
+            
+            # Get authors
+            authors = work.get("author", [])
+            if authors:
+                author_names = []
+                for author in authors:
+                    given = author.get("given", "")
+                    family = author.get("family", "")
+                    if given and family:
+                        author_names.append(f"{given} {family}")
+                    elif family:
+                        author_names.append(family)
+                    elif given:
+                        author_names.append(given)
+                
+                if author_names:
+                    return "; ".join(author_names)
+                    
+        return None
+        
+    except Exception:
+        return None
+
+def get_authors_pubmed_central(doi):
+    """Get author information from PubMed Central API."""
+    try:
+        # Clean DOI
+        doi = str(doi).strip()
+        if not doi or not doi.startswith("10."):
+            return None
+            
+        # PubMed Central API endpoint
+        url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+        params = {
+            "db": "pmc",
+            "id": doi,
+            "retmode": "json"
+        }
+        
+        response = requests.get(url, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if "result" in data and doi in data["result"]:
+                paper_data = data["result"][doi]
+                authors = paper_data.get("authors", [])
+                if authors:
+                    if isinstance(authors, list):
+                        return "; ".join([str(a) for a in authors if a])
+                    else:
+                        return str(authors)
+                        
+        return None
+        
+    except Exception:
+        return None
+
 def extract_citation_count(paper_data):
-    """Extract citation count from paper data using multiple sources with robust error handling."""
+    """Extract citation count using OpenCitations API and PubMed Central API for better reliability."""
     global citation_error_counter
 
-    # Suppress all warnings for this function
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    # First, check if citation data is already in the paper_data (fastest)
+    citation_fields = [
+        "citations", "citation_count", "cited_by_count", "times_cited",
+        "reference_count", "cited_count", "num_citations", "citedByCount"
+    ]
+    
+    for field in citation_fields:
+        if field in paper_data and paper_data[field] is not None:
+            try:
+                count = int(paper_data[field])
+                if count >= 0:
+                    return str(count)
+            except (ValueError, TypeError):
+                continue
 
-        # First, check if citation data is already in the paper_data (fastest)
-        citation_fields = [
-            "citations",
-            "citation_count",
-            "cited_by_count",
-            "times_cited",
-            "reference_count",
-            "cited_count",
-            "num_citations",
-            "citedByCount",
-        ]
+    # Try to get citation count from DOI if available
+    doi = paper_data.get("doi", "")
+    if doi:
+        # Clean and validate DOI
+        doi = str(doi).strip()
+        if not doi or doi.lower() in ["nan", "none", "null", ""]:
+            doi = ""
+        elif not doi.startswith("10."):
+            doi = ""
 
-        for field in citation_fields:
-            if field in paper_data and paper_data[field] is not None:
-                try:
-                    count = int(paper_data[field])
-                    if count >= 0:
-                        return str(count)
-                except (ValueError, TypeError):
-                    continue
+    if doi:
+        # Try OpenCitations API first (fast and reliable)
+        try:
+            citations = get_citations_opencitations(doi)
+            if citations is not None:
+                return str(citations)
+        except Exception:
+            pass
+        
+        # Try PubMed Central API as fallback
+        try:
+            citations = get_citations_pubmed_central(doi)
+            if citations is not None:
+                return str(citations)
+        except Exception:
+            pass
+        
+        # Final fallback to paperscraper if other APIs fail and paperscraper is available
+        if PAPERSCRAPER_AVAILABLE:
+            try:
+                citations = get_citations_by_doi(doi)
+                if citations is not None and citations >= 0:
+                    return str(citations)
+            except Exception as e:
+                citation_error_counter["doi_lookup_failures"] += 1
+                citation_error_counter["total_failures"] += 1
 
-        # Try to get citation count from DOI if available (more reliable than title)
-        doi = paper_data.get("doi", "")
-        if doi:
-            # Clean and validate DOI
-            doi = str(doi).strip()
-            if not doi or doi.lower() in ["nan", "none", "null", ""]:
-                doi = ""
-            else:
-                # Ensure DOI has proper format (should start with 10.)
-                if not doi.startswith("10."):
-                    doi = ""
+    # Only try title-based lookup if DOI failed and we have a good title
+    title = paper_data.get("title", "")
+    if title:
+        title = str(title).strip()
+        if not title or title.lower() in ["nan", "none", "null", ""]:
+            title = ""
+        elif len(title) < 10:
+            title = ""
 
-        if doi:
-            # Try DOI-based citation lookup (more reliable than title-based)
-            for attempt in range(1):  # Reduced to 1 attempt to speed up processing
-                try:
-                    # Wrap the entire paperscraper call in a try-except to handle internal library errors
-                    citations = get_citations_by_doi(doi)
-                    if citations is not None and citations >= 0:
-                        return str(citations)
-                except Exception as e:
-                    # Silently handle errors, just increment counter
-                    citation_error_counter["doi_lookup_failures"] += 1
-                    citation_error_counter["total_failures"] += 1
-                    time.sleep(1)  # Reduced delay to speed up processing
-                    continue
+    if title:
+        # Try PubMed Central API for title-based search
+        try:
+            citations = get_citations_pubmed_central_by_title(title)
+            if citations is not None:
+                return str(citations)
+        except Exception:
+            pass
+        
+        # Fallback to paperscraper if available
+        if PAPERSCRAPER_AVAILABLE:
+            try:
+                citations = get_citations_from_title(title)
+                if citations is not None and citations >= 0:
+                    return str(citations)
+            except Exception as e:
+                citation_error_counter["title_lookup_failures"] += 1
+                citation_error_counter["total_failures"] += 1
 
-        # Only try title-based lookup if DOI failed and we have a good title
-        title = paper_data.get("title", "")
-        if title:
-            # Clean and validate title
-            title = str(title).strip()
-            if not title or title.lower() in ["nan", "none", "null", ""]:
-                title = ""
-            elif len(title) < 10:  # Skip very short titles as they're less reliable
-                title = ""
+    # Final fallback: check for any other citation-related fields
+    for field in paper_data.keys():
+        if "citation" in field.lower() or "cited" in field.lower():
+            try:
+                value = paper_data[field]
+                if isinstance(value, (int, float)) and value >= 0:
+                    return str(int(value))
+                elif isinstance(value, str):
+                    import re
+                    numbers = re.findall(r"\d+", value)
+                    if numbers:
+                        return str(int(numbers[0]))
+            except (ValueError, TypeError):
+                continue
 
-        if title:
-            # Try title-based citation lookup (less reliable, so fewer attempts)
-            for attempt in range(
-                1
-            ):  # Only try once to avoid overwhelming Google Scholar
-                try:
-                    # Wrap the entire paperscraper call in a try-except to handle internal library errors
-                    citations = get_citations_from_title(title)
-                    if citations is not None and citations >= 0:
-                        return str(citations)
-                except Exception as e:
-                    # Silently handle errors, just increment counter
-                    citation_error_counter["title_lookup_failures"] += 1
-                    citation_error_counter["total_failures"] += 1
-                    time.sleep(1)  # Reduced delay to speed up processing
-                    continue
-
-        # Final fallback: check for any other citation-related fields
-        for field in paper_data.keys():
-            if "citation" in field.lower() or "cited" in field.lower():
-                try:
-                    value = paper_data[field]
-                    if isinstance(value, (int, float)) and value >= 0:
-                        return str(int(value))
-                    elif isinstance(value, str):
-                        # Try to extract number from string
-                        import re
-
-                        numbers = re.findall(r"\d+", value)
-                        if numbers:
-                            return str(int(numbers[0]))
-                except (ValueError, TypeError):
-                    continue
-
-        return "not found"
+    return "not found"
 
 
 def extract_journal_info(paper_data):
-    """Extract journal information from paper data using paperscraper with robust error handling."""
-    # Suppress all warnings for this function
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    """Extract journal information using multiple reliable APIs."""
+    # First check if journal information is already in the paper_data
+    journal_fields = [
+        "journal", "journal_name", "publication", "source", "venue",
+        "journal_title", "publication_venue", "journal_ref", "journal-ref"
+    ]
 
-        # First check if journal information is already in the paper_data
-        journal_fields = [
-            "journal",
-            "journal_name",
-            "publication",
-            "source",
-            "venue",
-            "journal_title",
-            "publication_venue",
-            "journal_ref",
-            "journal-ref",
-        ]
+    for field in journal_fields:
+        if field in paper_data and paper_data[field]:
+            journal_name = str(paper_data[field])
+            
+            # Try to get enhanced journal info from CrossRef API
+            enhanced_journal = get_journal_info_crossref(paper_data.get("doi", ""))
+            if enhanced_journal:
+                return enhanced_journal
+            
+            # Try to get enhanced journal info from PubMed Central API
+            enhanced_journal = get_journal_info_pubmed_central(paper_data.get("doi", ""))
+            if enhanced_journal:
+                return enhanced_journal
+            
+            # Return the original journal name if no enhancement found
+            return journal_name
 
-        for field in journal_fields:
-            if field in paper_data and paper_data[field]:
-                journal_name = str(paper_data[field])
-                # Try to get the full journal name using paperscraper
-                for attempt in range(2):  # Try up to 2 times
-                    try:
-                        impactor = Impactor()
-                        results = impactor.search(journal_name, threshold=85)
-                        if results:
-                            # Return the most relevant journal name
-                            return results[0]["journal"]
-                    except Exception as e:
-                        # Silently handle errors
-                        time.sleep(2 + attempt * 2)  # Progressive delay (2s, 4s)
-                        continue
-                # If paperscraper failed, return the original journal name
-                return journal_name
+    # If no journal found in paper_data, check source
+    source = paper_data.get("source", "")
+    if source in ["biorxiv", "medrxiv"]:
+        return f"{source.upper()}"
 
-        # If no journal found in paper_data, check source
-        source = paper_data.get("source", "")
-        if source in ["biorxiv", "medrxiv"]:
-            return f"{source.upper()}"
+    # Try to get journal info from DOI if available
+    doi = paper_data.get("doi", "")
+    if doi:
+        enhanced_journal = get_journal_info_crossref(doi)
+        if enhanced_journal:
+            return enhanced_journal
+        
+        enhanced_journal = get_journal_info_pubmed_central(doi)
+        if enhanced_journal:
+            return enhanced_journal
 
-        return "Unknown journal"
+    return "Unknown journal"
 
 
-import matplotlib.dates as mdates
+# Optional import for matplotlib.dates (used for plotting)
+try:
+    import matplotlib.dates as mdates
+    MATPLOTLIB_DATES_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_DATES_AVAILABLE = False
+    print("⚠️  matplotlib.dates not available - plotting features disabled")
+
 from collections import deque
 import threading
 
@@ -731,7 +1225,14 @@ except ImportError:
     SAVE_INTERVAL = 1000
     DUMPS = ["biorxiv", "medrxiv"]
 
-DUMP_ROOT = pkg_resources.resource_filename("paperscraper", "server_dumps")
+# Set dump root based on paperscraper availability
+if PAPERSCRAPER_AVAILABLE:
+    try:
+        DUMP_ROOT = pkg_resources.resource_filename("paperscraper", "server_dumps")
+    except Exception:
+        DUMP_ROOT = "paperscraper_dumps"  # Fallback to local directory
+else:
+    DUMP_ROOT = "paperscraper_dumps"  # Use local directory when paperscraper not available
 EMBEDDINGS_DIR = "xrvix_embeddings"
 
 # Rate limiting settings
@@ -846,7 +1347,7 @@ def load_citation_cache(embeddings_dir: str):
 
 
 def enrich_all_batches_metadata_from_citations(
-    embeddings_dir: str, citation_cache: dict | None = None
+    embeddings_dir: str, citation_cache=None
 ) -> dict:
     """
     Sweep all batch_*.json files in embeddings_dir/* and update only 'pending' fields
@@ -1009,8 +1510,9 @@ def process_paper_embeddings(paper_data, api_key):
     publication_date = extract_publication_date(row)
     year = publication_date[:4] if publication_date else str(datetime.now().year)
 
-    # Add paper to batch citation processing collection
-    add_paper_for_citation_processing(paper_data)
+    # NOTE: Papers are now added to citation processing only when they're actually 
+    # going to be processed in a batch, not here. This prevents the collection from 
+    # growing indefinitely.
 
     # Extract additional metadata fields (without citations/journal/impact factor)
     additional_metadata = extract_additional_metadata(row)
@@ -1210,9 +1712,6 @@ def sequential_process_papers(
 
     reset_papers_for_citation_processing()  # Reset citation processing collection
 
-    # Track papers processed for batch citation processing
-    papers_processed_since_last_citation_batch = 0
-
     with tqdm(
         total=len(unprocessed_papers),
         desc=f"Processing {db} papers (sequential)",
@@ -1225,24 +1724,32 @@ def sequential_process_papers(
             try:
                 results = process_paper_embeddings(paper_data, api_key)
                 if results:
+                    # Add paper to citation processing only when it's going to be processed
+                    add_paper_for_citation_processing(paper_data)
+                    
                     for result in results:
                         current_batch["embeddings"].append(result["embedding"])
                         current_batch["chunks"].append(result["chunk"])
                         current_batch["metadata"].append(result["metadata"])
                         db_embeddings += 1
                         metadata["total_embeddings"] += 1
+                    
+                    # When batch is full, process citations immediately and save
                     if len(current_batch["embeddings"]) >= BATCH_SIZE:
-                        # Enrich current batch metadata before saving the batch to disk
-                        try:
-                            citation_results = process_citations_batch(
-                                get_papers_for_citation_processing()
-                            )
-                            enrich_batch_metadata_from_citations(
-                                current_batch, citation_results
-                            )
-                        finally:
-                            # Reset the collection to avoid reprocessing the same papers repeatedly
-                            reset_papers_for_citation_processing()
+                        # Process citations for the current batch only
+                        citation_results = process_citations_batch(
+                            get_papers_for_citation_processing()
+                        )
+                        
+                        # Enrich current batch metadata with citation results
+                        enrich_batch_metadata_from_citations(
+                            current_batch, citation_results
+                        )
+                        
+                        # Reset the collection after processing this batch
+                        reset_papers_for_citation_processing()
+                        
+                        # Save the enriched batch
                         batch_file = save_batch(
                             current_batch, db, batch_num, embeddings_dir
                         )
@@ -1253,6 +1760,7 @@ def sequential_process_papers(
                         }
                         current_batch = {"embeddings": [], "chunks": [], "metadata": []}
                         batch_num += 1
+                        
             except Exception as e:
                 if "429" in str(e):
                     error_429 = True
@@ -1262,37 +1770,15 @@ def sequential_process_papers(
             db_chunks += len(chunk_paragraphs(row.get("abstract", "")))
             metadata["total_chunks"] += len(chunk_paragraphs(row.get("abstract", "")))
 
-            # Increment papers processed counter
-            papers_processed_since_last_citation_batch += 1
-
-            # Check if we need to process citations in batch (every 1000 papers)
-            if papers_processed_since_last_citation_batch >= 1000:
-                # Process citations for the collected papers
-                citation_results = process_citations_batch(
-                    get_papers_for_citation_processing()
-                )
-
-                # Merge into cache and update current batch metadata
-                merge_citation_results_into_cache(citation_results)
-                enrich_batch_metadata_from_citations(current_batch, citation_results)
-
-                # Reset the collection
-                reset_papers_for_citation_processing()
-                papers_processed_since_last_citation_batch = 0
-
             if pbar.n % SAVE_INTERVAL == 0 and pbar.n > 0:
                 save_metadata(metadata, embeddings_dir)
             pbar.update(1)
 
-    # Process any remaining papers for citations
-    citation_results = process_citations_batch(get_papers_for_citation_processing())
-
-    # Merge into cache and update current batch metadata
-    merge_citation_results_into_cache(citation_results)
-    enrich_batch_metadata_from_citations(current_batch, citation_results)
-
-    # Reset the collection
-    reset_papers_for_citation_processing()
+    # Process any remaining papers for citations if there are papers in the current batch
+    if current_batch["embeddings"]:
+        citation_results = process_citations_batch(get_papers_for_citation_processing())
+        enrich_batch_metadata_from_citations(current_batch, citation_results)
+        reset_papers_for_citation_processing()
 
     return db_embeddings, db_chunks, batch_num
 
@@ -1322,9 +1808,6 @@ def optimized_parallel_process_papers(
     reset_request_counter()
     reset_papers_for_citation_processing()  # Reset citation processing collection
 
-    # Track papers processed for batch citation processing
-    papers_processed_since_last_citation_batch = 0
-
     with ThreadPoolExecutor(max_workers=effective_workers) as executor:
         future_to_paper = {
             executor.submit(
@@ -1352,26 +1835,32 @@ def optimized_parallel_process_papers(
                 try:
                     results = future.result()
                     if results:
+                        # Add paper to citation processing only when it's going to be processed
+                        add_paper_for_citation_processing(paper_data)
+                        
                         for result in results:
                             current_batch["embeddings"].append(result["embedding"])
                             current_batch["chunks"].append(result["chunk"])
                             current_batch["metadata"].append(result["metadata"])
                             db_embeddings += 1
                             metadata["total_embeddings"] += 1
+                        
+                        # When batch is full, process citations immediately and save
                         if len(current_batch["embeddings"]) >= BATCH_SIZE:
+                            # Process citations for the current batch only
+                            citation_results = process_citations_batch(
+                                get_papers_for_citation_processing()
+                            )
+                            
+                            # Enrich current batch metadata with citation results
+                            enrich_batch_metadata_from_citations(
+                                current_batch, citation_results
+                            )
+                            
+                            # Reset the collection after processing this batch
+                            reset_papers_for_citation_processing()
 
-                            # Enrich current batch metadata before saving the batch to disk
-                            try:
-                                citation_results = process_citations_batch(
-                                    get_papers_for_citation_processing()
-                                )
-                                enrich_batch_metadata_from_citations(
-                                    current_batch, citation_results
-                                )
-                            finally:
-                                # Reset the collection to avoid reprocessing the same papers repeatedly
-                                reset_papers_for_citation_processing()
-
+                            # Save the enriched batch
                             batch_file = save_batch(
                                 current_batch, db, batch_num, embeddings_dir
                             )
@@ -1396,27 +1885,6 @@ def optimized_parallel_process_papers(
                     chunk_paragraphs(row.get("abstract", ""))
                 )
 
-                # Increment papers processed counter
-                papers_processed_since_last_citation_batch += 1
-
-                # Check if we need to process citations in batch (every 1000 papers)
-                if papers_processed_since_last_citation_batch >= 1000:
-                    # Process citations for the collected papers
-                    citation_results = process_citations_batch(
-                        get_papers_for_citation_processing()
-                    )
-
-                    # Merge into cache and update current batch metadata
-                    merge_citation_results_into_cache(citation_results)
-                    enrich_batch_metadata_from_citations(
-                        current_batch, citation_results
-                    )
-
-                    # Reset the collection
-                    reset_papers_for_citation_processing()
-                    papers_processed_since_last_citation_batch = 0
-
-
                 if pbar.n % SAVE_INTERVAL == 0 and pbar.n > 0:
                     save_metadata(metadata, embeddings_dir)
                 elapsed = time.time() - start_time
@@ -1432,16 +1900,11 @@ def optimized_parallel_process_papers(
                     plot.refresh()
                     last_plot_update = time.time()
 
-    # Process any remaining papers for citations
-    citation_results = process_citations_batch(get_papers_for_citation_processing())
-
-
-    # Merge into cache and update current batch metadata
-    merge_citation_results_into_cache(citation_results)
-    enrich_batch_metadata_from_citations(current_batch, citation_results)
-
-    # Reset the collection
-    reset_papers_for_citation_processing()
+    # Process any remaining papers for citations if there are papers in the current batch
+    if current_batch["embeddings"]:
+        citation_results = process_citations_batch(get_papers_for_citation_processing())
+        enrich_batch_metadata_from_citations(current_batch, citation_results)
+        reset_papers_for_citation_processing()
 
     plot.refresh()
     plot.close()
@@ -1471,8 +1934,9 @@ def process_paper_embeddings_optimized(paper_data, api_key, num_workers, worker_
     publication_date = extract_publication_date(row)
     year = publication_date[:4] if publication_date else str(datetime.now().year)
 
-    # Add paper to batch citation processing collection
-    add_paper_for_citation_processing(paper_data)
+    # NOTE: Papers are now added to citation processing only when they're actually 
+    # going to be processed in a batch, not here. This prevents the collection from 
+    # growing indefinitely.
 
     # Extract additional metadata fields (without citations/journal/impact factor)
     additional_metadata = extract_additional_metadata(row)
@@ -1591,8 +2055,16 @@ def legacy_sequential_process_xrvix():
     )
     print("   You may hit 429 errors if you exceed the API quota.")
 
-    import matplotlib.pyplot as plt
-    import matplotlib.dates as mdates
+    # Check if matplotlib is available for plotting
+    if not MATPLOTLIB_AVAILABLE or not MATPLOTLIB_DATES_AVAILABLE:
+        print("⚠️  matplotlib not available - plotting features disabled")
+        print("   Running without live plotting...")
+        plt = None
+        mdates = None
+    else:
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+    
     from collections import deque
     import threading
     import time
@@ -1856,6 +2328,37 @@ def legacy_sequential_process_xrvix():
     plt.show()
 
 
+def extract_journal_info_fast(paper_data):
+    """Fast journal info extraction with minimal API calls."""
+    # First check if journal info is already in the data
+    journal_fields = ["journal", "journal_name", "publication_venue", "venue", "container_title"]
+    
+    for field in journal_fields:
+        if field in paper_data and paper_data[field]:
+            journal = str(paper_data[field]).strip()
+            if journal and journal.lower() not in ["nan", "none", "null", ""]:
+                return journal
+    
+    # If no journal info found, return default
+    return "Unknown journal"
+
+def extract_impact_factor_fast(paper_data):
+    """Fast impact factor extraction with minimal API calls."""
+    # First check if impact factor is already in the data
+    impact_fields = ["impact_factor", "jcr_impact_factor", "sjr_impact_factor", "h_index"]
+    
+    for field in impact_fields:
+        if field in paper_data and paper_data[field] is not None:
+            try:
+                impact = float(paper_data[field])
+                if impact >= 0:
+                    return str(impact)
+            except (ValueError, TypeError):
+                continue
+    
+    # If no impact factor found, return default
+    return "not found"
+
 def main():
     print(
         "=== Starting xrvix Dumps Processing (Multi-File Storage with Adaptive Parallel Processing) ==="
@@ -2003,18 +2506,9 @@ def main():
 
             # Save any remaining embeddings in the current batch
             if current_batch["embeddings"]:
-                # Enrich from latest cached citations before saving
-                try:
-                    # We may have residual papers in the collection
-                    citation_results = process_citations_batch(
-                        get_papers_for_citation_processing()
-                    )
-                    merge_citation_results_into_cache(citation_results)
-                    enrich_batch_metadata_from_citations(
-                        current_batch, citation_results
-                    )
-                finally:
-                    reset_papers_for_citation_processing()
+                # Since papers are now only added to citation processing when they're actually processed,
+                # we don't need to process citations here - they should have been processed already
+                # when the batch was full, or will be processed in the next batch
                 batch_file = save_batch(current_batch, db, batch_num, EMBEDDINGS_DIR)
                 metadata["batches"][f"{db}_batch_{batch_num:04d}"] = {
                     "file": batch_file,

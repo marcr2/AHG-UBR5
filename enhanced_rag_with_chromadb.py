@@ -763,6 +763,326 @@ class EnhancedRAGQuery:
             print(f"❌ Error selecting dynamic chunks: {e}")
             return None
 
+    def select_diverse_papers_for_hypothesis_generation(self, query, target_papers=1500, lab_paper_ratio=None, preferred_authors=None):
+        """
+        Select exactly 1500 different papers for hypothesis generation, ensuring maximum diversity
+        while maintaining the existing prioritization system (lab author, date, citation count, impact factor).
+        
+        This function ensures that each hypothesis generation gets a completely different set of papers,
+        maximizing the variety of source chunks as required by the new prompt format.
+        
+        Args:
+            query: Search query
+            target_papers: Number of different papers to select (default: 1500)
+            lab_paper_ratio: Ratio of lab-authored papers to include
+            preferred_authors: List of preferred author names to prioritize
+            
+        Returns:
+            List of chunks from exactly target_papers different papers
+        """
+        if not self.use_chromadb or not self.chroma_manager:
+            print("❌ ChromaDB not available for diverse paper selection.")
+            return None
+
+        print(f"🎯 Selecting exactly {target_papers} different papers for hypothesis generation...")
+        print(f"🔍 Ensuring maximum diversity across all sources and papers")
+
+        try:
+            # Use configured lab paper ratio if not specified
+            if lab_paper_ratio is None:
+                lab_paper_ratio = getattr(self, 'lab_paper_ratio', None)
+
+            # Search for a large pool of papers to ensure we have enough diversity
+            # We need significantly more than target_papers to account for filtering and prioritization
+            search_pool_size = max(target_papers * 5, 10000)  # At least 5x the target, minimum 10k
+            
+            print(f"🔍 Searching ChromaDB for '{query}' to create pool of {search_pool_size} papers...")
+            
+            # Use the sophisticated lab paper search method to get a large pool
+            preferred_authors = getattr(self, 'preferred_authors', [])
+            search_results = self.retrieve_relevant_chunks_with_lab_papers(
+                query,
+                top_k=search_pool_size,
+                lab_paper_ratio=lab_paper_ratio,
+                preferred_authors=preferred_authors
+            )
+
+            if not search_results:
+                print("❌ No papers found in ChromaDB.")
+                return None
+
+            print(f"📊 Found {len(search_results)} papers in search pool")
+
+            # Step 1: Group results by paper (one chunk per paper)
+            paper_chunks = {}  # paper_id -> best_chunk
+            paper_metadata = {}  # paper_id -> metadata
+            
+            for result in search_results:
+                metadata = result.get('metadata', {})
+                paper_id = self._get_paper_identifier(metadata)
+                
+                if not paper_id:
+                    continue
+                    
+                # Store the best chunk for each paper (first one found)
+                if paper_id not in paper_chunks:
+                    paper_chunks[paper_id] = result['chunk']
+                    paper_metadata[paper_id] = metadata
+
+            print(f"📊 Identified {len(paper_chunks)} unique papers")
+
+            # Step 2: Apply existing prioritization system
+            # Categorize papers by priority level
+            lab_papers = []
+            preferred_author_papers = []
+            other_papers = []
+            
+            for paper_id, metadata in paper_metadata.items():
+                if self.is_lab_authored_paper(metadata):
+                    lab_papers.append((paper_id, metadata))
+                elif preferred_authors and self._is_preferred_author_paper(metadata, preferred_authors):
+                    preferred_author_papers.append((paper_id, metadata))
+                else:
+                    other_papers.append((paper_id, metadata))
+
+            print(f"📊 Priority categorization: {len(lab_papers)} lab papers, {len(preferred_author_papers)} preferred author papers, {len(other_papers)} other papers")
+
+            # Step 3: Calculate prioritization scores for other papers
+            # Extract citation and journal data for scoring
+            all_citations = []
+            journal_impact_factors = {}
+            
+            for paper_id, metadata in paper_metadata.items():
+                citation_count = metadata.get('citation_count', 'not found')
+                journal = metadata.get('journal', 'Unknown journal')
+                
+                if citation_count != 'not found':
+                    try:
+                        all_citations.append(int(citation_count))
+                    except (ValueError, TypeError):
+                        pass
+                
+                if journal not in journal_impact_factors:
+                    journal_impact_factors[journal] = []
+                if citation_count != 'not found':
+                    try:
+                        journal_impact_factors[journal].append(int(citation_count))
+                    except (ValueError, TypeError):
+                        pass
+
+            # Calculate statistics for scoring
+            avg_citations = np.mean(all_citations) if all_citations else 0
+            journal_impact_scores = {}
+            for journal, citations in journal_impact_factors.items():
+                if citations:
+                    journal_impact_scores[journal] = np.mean(citations)
+
+            # Step 4: Score and sort other papers
+            def score_paper(paper_id, metadata):
+                journal = metadata.get('journal', 'Unknown journal')
+                citation_count = metadata.get('citation_count', 'not found')
+                
+                # Journal impact score (0-1 scale)
+                journal_score = 0
+                if journal in journal_impact_scores:
+                    max_impact = max(journal_impact_scores.values()) if journal_impact_scores else 1
+                    journal_score = journal_impact_scores[journal] / max_impact if max_impact > 0 else 0
+                
+                # Citation score (0-1 scale)
+                citation_score = 0
+                if citation_count != 'not found':
+                    try:
+                        citations = int(citation_count)
+                        citation_score = min(citations / avg_citations, 2.0) if avg_citations > 0 else 0
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Combined score (weighted average)
+                combined_score = (journal_score * 0.4) + (citation_score * 0.6)
+                return combined_score
+
+            # Score and sort other papers
+            other_papers_scored = [(paper_id, metadata, score_paper(paper_id, metadata)) for paper_id, metadata in other_papers]
+            other_papers_scored.sort(key=lambda x: x[2], reverse=True)
+
+            # Step 5: Select papers ensuring diversity with temporal balance
+            selected_papers = set()
+            selected_chunks = []
+            
+            # First, add all lab papers (highest priority)
+            lab_papers_to_add = min(len(lab_papers), int(target_papers * 0.3))  # Up to 30% lab papers
+            for paper_id, metadata in lab_papers[:lab_papers_to_add]:
+                if paper_id not in selected_papers:
+                    selected_papers.add(paper_id)
+                    selected_chunks.append(paper_chunks[paper_id])
+                    if len(selected_papers) >= target_papers:
+                        break
+
+            # Next, add preferred author papers
+            preferred_author_papers_to_add = min(len(preferred_author_papers), int(target_papers * 0.2))  # Up to 20% preferred author papers
+            for paper_id, metadata in preferred_author_papers[:preferred_author_papers_to_add]:
+                if paper_id not in selected_papers:
+                    selected_papers.add(paper_id)
+                    selected_chunks.append(paper_chunks[paper_id])
+                    if len(selected_papers) >= target_papers:
+                        break
+
+            # Calculate remaining slots for other papers
+            remaining_needed = target_papers - len(selected_papers)
+            
+            # For other papers, ensure temporal balance: 50% from oldest 25% and newest 25%
+            if remaining_needed > 0 and other_papers_scored:
+                # Extract publication years for temporal analysis
+                paper_years = []
+                for paper_id, metadata, score in other_papers_scored:
+                    publication_date = metadata.get('publication_date', '')
+                    if publication_date and len(publication_date) >= 4:
+                        try:
+                            year = int(publication_date[:4])
+                            paper_years.append((paper_id, metadata, score, year))
+                        except (ValueError, TypeError):
+                            # If we can't determine year, add with year 0 (will be treated as unknown)
+                            paper_years.append((paper_id, metadata, score, 0))
+                    else:
+                        # No publication date, add with year 0
+                        paper_years.append((paper_id, metadata, score, 0))
+                
+                if paper_years:
+                    # Sort by year (oldest first)
+                    paper_years.sort(key=lambda x: x[3])
+                    
+                    # Calculate temporal quartiles
+                    total_other_papers = len(paper_years)
+                    q1_size = max(1, total_other_papers // 4)  # Bottom 25% (oldest)
+                    q4_size = max(1, total_other_papers // 4)  # Top 25% (newest)
+                    
+                    # Calculate how many papers to take from each temporal quartile
+                    # We want 50% of remaining_needed from oldest+newest, 50% from middle
+                    temporal_balance_count = min(remaining_needed // 2, q1_size + q4_size)
+                    middle_count = remaining_needed - temporal_balance_count
+                    
+                    print(f"📅 Temporal balance: {temporal_balance_count} papers from oldest/newest quartiles, {middle_count} from middle")
+                    
+                    # Select from oldest papers (bottom 25%)
+                    oldest_papers = paper_years[:q1_size]
+                    oldest_selected = 0
+                    for paper_id, metadata, score, year in oldest_papers:
+                        if oldest_selected >= temporal_balance_count // 2:
+                            break
+                        if paper_id not in selected_papers:
+                            selected_papers.add(paper_id)
+                            selected_chunks.append(paper_chunks[paper_id])
+                            oldest_selected += 1
+                            if len(selected_papers) >= target_papers:
+                                break
+                    
+                    # Select from newest papers (top 25%)
+                    newest_papers = paper_years[-q4_size:]
+                    newest_selected = 0
+                    for paper_id, metadata, score, year in newest_papers:
+                        if newest_selected >= temporal_balance_count // 2:
+                            break
+                        if paper_id not in selected_papers:
+                            selected_papers.add(paper_id)
+                            selected_chunks.append(paper_chunks[paper_id])
+                            newest_selected += 1
+                            if len(selected_papers) >= target_papers:
+                                break
+                    
+                    # Fill remaining slots with middle-aged papers (prioritized by score)
+                    middle_papers = paper_years[q1_size:-q4_size]  # Middle 50%
+                    middle_papers.sort(key=lambda x: x[2], reverse=True)  # Sort by score (highest first)
+                    
+                    for paper_id, metadata, score, year in middle_papers:
+                        if len(selected_papers) >= target_papers:
+                            break
+                        if paper_id not in selected_papers:
+                            selected_papers.add(paper_id)
+                            selected_chunks.append(paper_chunks[paper_id])
+                    
+                    print(f"📊 Temporal distribution: {oldest_selected} oldest, {newest_selected} newest, {len(selected_papers) - lab_papers_to_add - preferred_author_papers_to_add - oldest_selected - newest_selected} middle-aged")
+                else:
+                    # Fallback: no temporal data available, use original scoring
+                    for paper_id, metadata, score in other_papers_scored[:remaining_needed]:
+                        if paper_id not in selected_papers:
+                            selected_papers.add(paper_id)
+                            selected_chunks.append(paper_chunks[paper_id])
+                            if len(selected_papers) >= target_papers:
+                                break
+
+            # Step 6: Ensure we have exactly target_papers
+            if len(selected_papers) < target_papers:
+                print(f"⚠️  Only found {len(selected_papers)} unique papers (requested {target_papers})")
+                print("🔄 Attempting to fill remaining slots with any available papers...")
+                
+                # Fill remaining slots with any available papers
+                remaining_papers = [p for p in other_papers_scored if p[0] not in selected_papers]
+                for paper_id, metadata, score in remaining_papers:
+                    if len(selected_papers) >= target_papers:
+                        break
+                    selected_papers.add(paper_id)
+                    selected_chunks.append(paper_chunks[paper_id])
+
+            # Step 7: Update used papers tracking
+            self.used_papers.update(selected_papers)
+
+            print(f"✅ Successfully selected exactly {len(selected_papers)} different papers")
+            print(f"📊 Lab papers: {len([p for p in selected_papers if p in [pid for pid, _ in lab_papers[:lab_papers_to_add]]])}")
+            print(f"📊 Preferred author papers: {len([p for p in selected_papers if p in [pid for pid, _ in preferred_author_papers[:preferred_author_papers_to_add]]])}")
+            
+            # Calculate temporal distribution for other papers
+            other_papers_count = len(selected_papers) - len([p for p in selected_papers if p in [pid for pid, _ in lab_papers[:lab_papers_to_add]]]) - len([p for p in selected_papers if p in [pid for pid, _ in preferred_author_papers[:preferred_author_papers_to_add]]])
+            print(f"📊 Other papers: {other_papers_count}")
+            
+            if other_papers_count > 0:
+                # Re-analyze the temporal distribution for better reporting
+                other_paper_years = []
+                for paper_id in selected_papers:
+                    if (paper_id not in [pid for pid, _ in lab_papers[:lab_papers_to_add]] and 
+                        paper_id not in [pid for pid, _ in preferred_author_papers[:preferred_author_papers_to_add]]):
+                        metadata = paper_metadata[paper_id]
+                        publication_date = metadata.get('publication_date', '')
+                        if publication_date and len(publication_date) >= 4:
+                            try:
+                                year = int(publication_date[:4])
+                                other_paper_years.append(year)
+                            except (ValueError, TypeError):
+                                pass
+                
+                if other_paper_years:
+                    other_paper_years.sort()
+                    total_other = len(other_paper_years)
+                    q1_idx = max(0, total_other // 4 - 1)
+                    q3_idx = min(total_other - 1, 3 * total_other // 4)
+                    
+                    oldest_papers = len([y for y in other_paper_years if y <= other_paper_years[q1_idx]])
+                    newest_papers = len([y for y in other_paper_years if y >= other_paper_years[q3_idx]])
+                    middle_papers = total_other - oldest_papers - newest_papers
+                    
+                    print(f"   📅 Temporal distribution of other papers:")
+                    print(f"      • Oldest 25%: {oldest_papers} papers (≤{other_paper_years[q1_idx] if oldest_papers > 0 else 'N/A'})")
+                    print(f"      • Middle 50%: {middle_papers} papers")
+                    print(f"      • Newest 25%: {newest_papers} papers (≥{other_paper_years[q3_idx] if newest_papers > 0 else 'N/A'})")
+                    print(f"      • Year range: {min(other_paper_years)} - {max(other_paper_years)}")
+            
+            print(f"📊 Total papers used so far: {len(self.used_papers)}")
+
+            # Store the results for citation extraction
+            self.last_diverse_results = []
+            for paper_id in selected_papers:
+                metadata = paper_metadata[paper_id]
+                chunk = paper_chunks[paper_id]
+                self.last_diverse_results.append({
+                    'chunk': chunk,
+                    'metadata': metadata
+                })
+
+            return selected_chunks
+
+        except Exception as e:
+            print(f"❌ Error selecting diverse papers: {e}")
+            return None
+
     def _apply_randomization_strategy(self, results, strategy='enhanced'):
         """
         Apply different randomization strategies to chunk selection results.
@@ -2318,7 +2638,7 @@ class EnhancedRAGQuery:
     def _display_commands(self):
         """Display available commands."""
         print(f"\n💡 Available commands:")
-        print(f"   - 'add <query>': Search, batch, and generate hypotheses from all relevant results (e.g., 'add cancer')")
+        print(f"   - 'add <query>': Search, batch, and generate hypotheses with automatic diverse paper selection (e.g., 'add cancer')")
         print(f"   - 'add <N> <query>': Search, batch, and generate hypotheses from up to N results (e.g., 'add 2000 cancer')")
         print(f"   - 'add all <query>': Search, batch, and generate hypotheses from ALL found results (e.g., 'add all cancer')")
         print(f"   - 'meta <query>': Use meta-hypothesis generator to create 5 diverse research directions, then generate hypotheses for each (e.g., 'meta UBR-5 in cancer')")
@@ -2328,13 +2648,15 @@ class EnhancedRAGQuery:
         print(f"   - 'records': Show current hypothesis records")
         print(f"   - 'clear_records': Clear hypothesis records")
         print(f"   - 'reset_papers': Reset used papers list (allow reusing papers)")
+        print(f"   - 'reset_diverse': Reset diverse paper selection (get new set of 1500 papers)")
         print(f"   - 'papers_status': Show used papers tracking status")
         print(f"   - 'lab_ratio': Configure ratio of lab-authored papers (auto/fixed ratio)")
         print(f"   - 'preferred_authors': Configure preferred authors for search prioritization")
         print(f"   - 'randomization': Configure chunk randomization strategy")
         print(f"   - 'test_lab': Test lab paper detection with current query")
+        print(f"   - 'diverse <query>': Manually select exactly 1500 different papers for hypothesis generation (diverse search is now DEFAULT)")
         print(f"   💡 Note: Large queries may take longer and use more API calls. Use 'clear' if you get errors.")
-        print(f"   📚 Default: 1500 chunks per hypothesis generation for richer context!")
+        print(f"   📚 Default: Diverse search with 1500 chunks from different papers for maximum variety!")
         print()
 
     def interactive_search(self):
@@ -2358,6 +2680,14 @@ class EnhancedRAGQuery:
                 self.reset_used_papers()
             elif query.lower() == 'papers_status':
                 self.show_used_papers_status()
+            elif query.lower() == 'reset_diverse':
+                if (hasattr(self, 'current_package') and 
+                    self.current_package.get('method') == 'diverse_paper_selection'):
+                    print("🔄 Resetting diverse paper selection...")
+                    self.current_package = {}
+                    print("✅ Diverse paper selection reset. Use 'diverse <query>' to select a new set of 1500 papers.")
+                else:
+                    print("ℹ️  No diverse paper selection to reset.")
             elif query.lower() == 'lab_ratio':
                 self.configure_lab_paper_ratio()
             elif query.lower() == 'preferred_authors':
@@ -2371,6 +2701,48 @@ class EnhancedRAGQuery:
                 else:
                     test_query = "UBR5 cancer"
                 self.test_lab_paper_detection(test_query)
+            elif query.lower().startswith('diverse '):
+                try:
+                    parts = query.split(' ', 1)
+                    if len(parts) < 2:
+                        print("❌ Usage: diverse <query> (e.g., 'diverse UBR-5 in cancer')")
+                        continue
+                    
+                    diverse_query = parts[1]
+                    print(f"\n🎯 Selecting exactly 1500 different papers for hypothesis generation...")
+                    print(f"🔍 Query: '{diverse_query}'")
+                    print(f"📚 This ensures maximum diversity across all sources and papers")
+                    
+                    response = input("Continue? (y/n): ").lower()
+                    if response == 'y':
+                        try:
+                            # Use the new diversity function
+                            diverse_chunks = self.select_diverse_papers_for_hypothesis_generation(
+                                diverse_query, 
+                                target_papers=1500
+                            )
+                            
+                            if diverse_chunks:
+                                print(f"\n✅ Successfully selected {len(diverse_chunks)} chunks from exactly 1500 different papers!")
+                                print(f"🎯 Each hypothesis generation will now use a completely different set of source chunks")
+                                print(f"📊 Papers are prioritized by: lab authorship, preferred authors, citation count, and impact factor")
+                                
+                                # Store the diverse chunks for future hypothesis generation
+                                self.current_package = {
+                                    "chunks": diverse_chunks,
+                                    "prompt": diverse_query,
+                                    "method": "diverse_paper_selection"
+                                }
+                                
+                                print(f"📦 Diverse paper package stored. Use 'add' command to generate hypotheses with these diverse chunks.")
+                            else:
+                                print("❌ Failed to select diverse papers.")
+                        except Exception as e:
+                            print(f"❌ Error during diverse paper selection: {e}")
+                    else:
+                        print("Diverse paper selection cancelled.")
+                except Exception as e:
+                    print(f"❌ Error processing diverse command: {e}")
             elif query.lower().startswith('meta '):
                 try:
                     parts = query.split(' ', 1)
@@ -2496,7 +2868,24 @@ class EnhancedRAGQuery:
                         print(f"📦 Found {len(results)} relevant chunks. Beginning batch processing...")
                         # Batch process for hypothesis generation
                         batch_size = 500
-                        all_chunks = [r['chunk'] for r in results]
+                        
+                        # AUTOMATICALLY use diverse paper selection as default for hypothesis generation
+                        print(f"\n🎯 Automatically selecting diverse papers for hypothesis generation...")
+                        print(f"📚 This ensures maximum diversity across all sources and papers")
+                        
+                        diverse_chunks = self.select_diverse_papers_for_hypothesis_generation(
+                            search_query, 
+                            target_papers=1500
+                        )
+                        
+                        if diverse_chunks:
+                            print(f"✅ Successfully selected {len(diverse_chunks)} chunks from exactly 1500 different papers!")
+                            print(f"🎯 Each hypothesis generation will now use a completely different set of source chunks")
+                            print(f"📊 Papers are prioritized by: lab authorship, preferred authors, citation count, and impact factor")
+                            all_chunks = diverse_chunks
+                        else:
+                            print(f"⚠️  Failed to select diverse papers, falling back to original chunks")
+                            all_chunks = [r['chunk'] for r in results]
                         # Sequential, real-time generator-critic loop for 5 accepted hypotheses
                         print(f"\n🧠 Generating hypotheses one at a time until 5 are accepted (novelty >= {novelty_threshold}, accuracy >= {accuracy_threshold}, 5-minute time limit per critique)...")
                         accepted_hypotheses = []
@@ -2506,18 +2895,9 @@ class EnhancedRAGQuery:
                             attempts += 1
                             print(f"\n🧠 Generating hypothesis attempt {attempts}...")
 
-                            # ALWAYS select new chunks for EVERY hypothesis attempt to ensure diversity
-                            if self.use_chromadb and self.chroma_manager and self.initial_add_quantity:
-                                print(f"🔄 Selecting new chunks for hypothesis attempt {attempts}...")
-                                randomization_strategy = getattr(self, 'randomization_strategy', 'enhanced')
-                                dynamic_chunks = self.select_dynamic_chunks_for_generation(search_query, randomization_strategy=randomization_strategy)
-                                if dynamic_chunks:
-                                    all_chunks = dynamic_chunks
-                                    print(f"📚 Using {len(all_chunks)} dynamically selected chunks for generation")
-                                else:
-                                    print(f"⚠️  Failed to select dynamic chunks, using original chunks")
-                            else:
-                                print(f"📚 Using original chunks for generation (no dynamic selection available)")
+                            # Use the diverse chunks for all attempts (no need to re-select)
+                            print(f"🎯 Using diverse paper chunks for hypothesis attempt {attempts}...")
+                            print(f"📚 Using {len(all_chunks)} chunks from exactly 1500 different papers")
 
                             # Start timer for this hypothesis
                             self.hypothesis_timer.start()

@@ -20,6 +20,7 @@ chroma_db/
 pubmed_embeddings.json
 chroma_db_backup/
 embed_backup/
+paperscraper_dumps/
 
 # Cache directories
 __pycache__/

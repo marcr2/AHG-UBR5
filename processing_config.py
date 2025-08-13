@@ -5,13 +5,18 @@ Adjust these settings based on your system capabilities and API limits.
 
 # --- PARALLEL PROCESSING CONFIGURATION ---
 # Optimized parallel processing configuration
-MAX_WORKERS = 6  # Number of parallel workers for processing
-BATCH_SIZE = 200  # Number of papers to process in each batch
-RATE_LIMIT_DELAY = 0.04  # Delay between requests (seconds) - optimized for 1500 req/min
-REQUEST_TIMEOUT = 60  # Timeout for API requests (seconds)
+MAX_WORKERS = 8  # Increased from 6 to 8 for faster processing
+BATCH_SIZE = 500  # Increased from 200 to 500 for fewer citation processing cycles
+RATE_LIMIT_DELAY = 0.02  # Reduced from 0.04 to 0.02 for faster processing
+REQUEST_TIMEOUT = 30  # Reduced from 60 to 30 for faster failure detection
 MIN_CHUNK_LENGTH = 50  # Minimum chunk length for text splitting
 MAX_CHUNK_LENGTH = 8000  # Maximum chunk length for text splitting
 SAVE_INTERVAL = 1000  # Save progress every N papers
+
+# --- CITATION PROCESSING OPTIMIZATION ---
+CITATION_MAX_WORKERS = 20  # Maximum parallel workers for citation processing
+CITATION_TIMEOUT = 10  # Timeout per citation request (seconds)
+CITATION_BATCH_SIZE = 500  # Process citations in batches of 500 for optimal speed
 
 # --- VECTOR DATABASE CONFIG ---
 DB_BATCH_SIZE = 5000  # Number of embeddings to add to ChromaDB in one operation (max allowed by ChromaDB is 5461)
