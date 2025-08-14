@@ -231,11 +231,14 @@ class EnhancedRAGQuery:
                     "metadata": []
                 }
 
-                for i, meta in enumerate(self.embeddings_data["metadata"]):
-                    if meta.get("source_file") == source_name:
-                        source_data["chunks"].append(self.embeddings_data["chunks"][i])
-                        source_data["embeddings"].append(self.embeddings_data["embeddings"][i])
-                        source_data["metadata"].append(meta)
+                # Add progress bar for metadata processing
+                with tqdm(total=len(self.embeddings_data["metadata"]), desc=f"Processing metadata for {source_name}", unit="entry") as meta_pbar:
+                    for i, meta in enumerate(self.embeddings_data["metadata"]):
+                        if meta.get("source_file") == source_name:
+                            source_data["chunks"].append(self.embeddings_data["chunks"][i])
+                            source_data["embeddings"].append(self.embeddings_data["embeddings"][i])
+                            source_data["metadata"].append(meta)
+                        meta_pbar.update(1)
 
                 if source_data["chunks"]:
                     self.chroma_manager.add_embeddings_to_collection(source_data, source_name)
@@ -302,13 +305,15 @@ class EnhancedRAGQuery:
         total_chunks = 0
 
         # Load PubMed embeddings (single file)
-        if os.path.exists("pubmed_embeddings.json"):
-            logger.info(f"🔄 Loading pubmed_embeddings.json...")
-            data = self.load_embeddings_from_json("pubmed_embeddings.json")
+        if os.path.exists("xrvix_embeddings/pubmed_embeddings.json"):
+            logger.info(f"🔄 Loading pubmed_embeddings.json from xrvix_embeddings folder...")
+            data = self.load_embeddings_from_json("xrvix_embeddings/pubmed_embeddings.json")
             if data:
-                # Add source prefix to metadata
-                for meta in data["metadata"]:
-                    meta["source_file"] = "pubmed"
+                # Add source prefix to metadata with progress bar
+                with tqdm(total=len(data["metadata"]), desc="Adding source prefix to PubMed metadata", unit="entry") as meta_pbar:
+                    for meta in data["metadata"]:
+                        meta["source_file"] = "pubmed"
+                        meta_pbar.update(1)
 
                 # Append to combined data
                 all_data["chunks"].extend(data["chunks"])
@@ -362,9 +367,12 @@ class EnhancedRAGQuery:
                             with open(batch_path, 'r', encoding='utf-8') as f:
                                 batch_data = json.load(f)
 
-                            # Add source information to metadata
-                            for meta in batch_data.get("metadata", []):
-                                meta["source_file"] = source_dir
+                            # Add source information to metadata with progress bar
+                            batch_metadata = batch_data.get("metadata", [])
+                            with tqdm(total=len(batch_metadata), desc=f"Adding source info to {source_dir} batch", unit="entry") as meta_pbar:
+                                for meta in batch_metadata:
+                                    meta["source_file"] = source_dir
+                                    meta_pbar.update(1)
 
                             # Append to combined data
                             batch_chunks = len(batch_data.get("chunks", []))
@@ -3707,7 +3715,7 @@ class EnhancedRAGQuery:
     def sophisticated_lab_paper_search(self, query, top_k=1500, lab_paper_ratio=None, preferred_authors=None):
         """
         Sophisticated lab paper search with author prioritization, impact factor weighting, 
-        citation analysis, and temporal balance (50/50 old/new mix).
+        citation analysis, temporal balance (50/50 old/new mix), and preprint deprioritization.
         
         Args:
             query: Search query
@@ -3846,8 +3854,8 @@ class EnhancedRAGQuery:
 
         print(f"✅ Selected {len(selected_papers)} author-prioritized papers")
 
-        # Step 6: Remaining paper selection with temporal balance (Step 2 of search execution)
-        print(f"📚 Step 2: Selecting remaining papers with temporal balance...")
+        # Step 6: Remaining paper selection with temporal balance and preprint deprioritization (Step 2 of search execution)
+        print(f"📚 Step 2: Selecting remaining papers with temporal balance and preprint deprioritization...")
         
         # Calculate median age of ALL search results (not just selected papers)
         all_years = []
@@ -3880,7 +3888,7 @@ class EnhancedRAGQuery:
             print(f"📊 Papers ≤ {median_year:.0f}: {sum(1 for y in all_years if y <= median_year)}")
             print(f"📊 Papers > {median_year:.0f}: {sum(1 for y in all_years if y > median_year)}")
 
-        # Categorize remaining papers by temporal period
+        # Categorize remaining papers by temporal period and preprint status
         old_papers = []
         new_papers = []
         
@@ -3892,120 +3900,327 @@ class EnhancedRAGQuery:
             metadata = paper.get('metadata', {})
             publication_date = metadata.get('publication_date', '')
             
+            # Determine temporal category
+            temporal_category = None
             if publication_date and len(publication_date) >= 4:
                 try:
                     year = int(publication_date[:4])
                     if year <= median_year:
-                        old_papers.append(paper)
+                        temporal_category = 'old'
                     else:
-                        new_papers.append(paper)
+                        temporal_category = 'new'
                 except (ValueError, TypeError):
-                    # If we can't determine year, put in new papers
-                    new_papers.append(paper)
+                    temporal_category = 'unknown'
             else:
-                # If no publication date, put in new papers
+                temporal_category = 'unknown'
+            
+            # Determine preprint status
+            is_preprint = metadata.get('is_preprint', False)
+            preprint_score = metadata.get('preprint_score', 0.0)
+            preprint_type = metadata.get('preprint_type', 'unknown')
+            
+            # Add preprint information to metadata if not present
+            if 'is_preprint' not in metadata:
+                # Try to detect preprint status from existing fields
+                source = metadata.get('source', '').lower()
+                journal = metadata.get('journal', '').lower()
+                
+                if (source in ['biorxiv', 'medrxiv', 'arxiv', 'chemrxiv'] or 
+                    any(indicator in journal for indicator in ['arxiv', 'biorxiv', 'medrxiv', 'chemrxiv', 'preprint'])):
+                    is_preprint = True
+                    preprint_score = 0.8
+                    preprint_type = source if source else 'preprint_server'
+                
+                # Update metadata
+                metadata['is_preprint'] = is_preprint
+                metadata['preprint_score'] = preprint_score
+                metadata['preprint_type'] = preprint_type
+            
+            # Categorize by temporal period
+            if temporal_category == 'old':
+                old_papers.append(paper)
+            elif temporal_category == 'new':
                 new_papers.append(paper)
+            else:
+                # Unknown date papers go to old category as fallback
+                old_papers.append(paper)
 
         print(f"📊 Categorized remaining papers: {len(old_papers)} old, {len(new_papers)} new")
-
-        # Step 7: Apply prioritization within each temporal category
-        print(f"🎯 Applying prioritization within temporal categories...")
         
-        # Score papers based on impact factor and citations
-        def score_paper(paper):
+        # Count preprint papers for reporting
+        preprint_count = sum(1 for p in old_papers + new_papers 
+                           if p.get('metadata', {}).get('is_preprint', False))
+        print(f"📊 Found {preprint_count} preprint papers (will be deprioritized)")
+
+        # Step 7: Score and rank remaining papers with preprint deprioritization
+        print(f"🎯 Step 3: Scoring and ranking papers with preprint deprioritization...")
+        
+        def calculate_paper_score(paper, is_old_paper):
+            """Calculate comprehensive paper score with preprint deprioritization."""
             metadata = paper.get('metadata', {})
-            journal = metadata.get('journal', 'Unknown journal')
+            
+            # Base score starts at 100
+            score = 100.0
+            
+            # Citation-based scoring (0-50 points)
             citation_count = metadata.get('citation_count', 'not found')
-            
-            # Journal impact score (0-1 scale)
-            journal_score = 0
-            if journal in journal_impact_scores:
-                # Normalize journal score relative to max impact
-                max_impact = max(journal_impact_scores.values()) if journal_impact_scores else 1
-                journal_score = journal_impact_scores[journal] / max_impact if max_impact > 0 else 0
-            
-            # Citation score (0-1 scale)
-            citation_score = 0
             if citation_count != 'not found':
                 try:
                     citations = int(citation_count)
-                    # Normalize citation score relative to average
-                    citation_score = min(citations / avg_citations, 2.0) if avg_citations > 0 else 0
+                    if citations > 0:
+                        # Logarithmic scaling for citations
+                        citation_score = min(50, 10 * np.log10(citations + 1))
+                        score += citation_score
                 except (ValueError, TypeError):
                     pass
             
-            # Combined score (weighted average)
-            combined_score = (journal_score * 0.4) + (citation_score * 0.6)
-            return combined_score
-
-        # Score and sort papers in each category
-        old_papers_scored = [(paper, score_paper(paper)) for paper in old_papers]
-        new_papers_scored = [(paper, score_paper(paper)) for paper in new_papers]
+            # Journal impact scoring (0-30 points)
+            journal = metadata.get('journal', 'Unknown journal')
+            if journal in journal_impact_scores:
+                journal_score = min(30, journal_impact_scores[journal] / 10)
+                score += journal_score
+            
+            # Temporal balance scoring (0-20 points)
+            if is_old_paper:
+                # Old papers get bonus to maintain balance
+                score += 20
+            else:
+                # New papers get smaller bonus
+                score += 10
+            
+            # PREPRINT DEPRIORITIZATION (penalty of 0-40 points)
+            is_preprint = metadata.get('is_preprint', False)
+            preprint_score = metadata.get('preprint_score', 0.0)
+            
+            if is_preprint:
+                # Calculate preprint penalty based on preprint score
+                # Higher preprint score = higher penalty (more clearly a preprint)
+                preprint_penalty = min(40, preprint_score * 50)  # 0.8 score = 40 penalty
+                score -= preprint_penalty
+                
+                # Additional penalty for certain preprint types
+                preprint_type = metadata.get('preprint_type', '')
+                if preprint_type in ['biorxiv', 'medrxiv', 'chemrxiv']:
+                    score -= 10  # Extra penalty for bio/med/chem preprints
+                elif preprint_type == 'working_paper':
+                    score -= 5   # Smaller penalty for working papers
+            
+            # Ensure score doesn't go below 0
+            score = max(0, score)
+            
+            return score
         
+        # Score old papers
+        old_papers_scored = []
+        for paper in old_papers:
+            score = calculate_paper_score(paper, is_old_paper=True)
+            old_papers_scored.append((paper, score))
+        
+        # Score new papers
+        new_papers_scored = []
+        for paper in new_papers:
+            score = calculate_paper_score(paper, is_old_paper=False)
+            new_papers_scored.append((paper, score))
+        
+        # Sort by score (highest first)
         old_papers_scored.sort(key=lambda x: x[1], reverse=True)
         new_papers_scored.sort(key=lambda x: x[1], reverse=True)
+        
+        # Show top scored papers for each category
+        print(f"📊 Top 5 old papers scores: {[f'{p[1]:.1f}' for p in old_papers_scored[:5]]}")
+        print(f"📊 Top 5 new papers scores: {[f'{p[1]:.1f}' for p in new_papers_scored[:5]]}")
+        
+        # Count preprint papers in top scores
+        top_old_preprints = sum(1 for p, _ in old_papers_scored[:20] 
+                               if p.get('metadata', {}).get('is_preprint', False))
+        top_new_preprints = sum(1 for p, _ in new_papers_scored[:20] 
+                               if p.get('metadata', {}).get('is_preprint', False))
+        print(f"📊 Preprint papers in top 20 scores: {top_old_preprints} old, {top_new_preprints} new")
 
-        # Select equal numbers from each category (50/50 temporal balance)
-        chunks_per_category = remaining_chunks_needed // 2
-        remaining_single = remaining_chunks_needed % 2
-
-        # Add old papers
-        old_papers_selected = []
-        for paper, score in old_papers_scored[:chunks_per_category + remaining_single]:
+        # Step 8: Select remaining papers with balanced distribution
+        print(f"🎯 Step 4: Selecting remaining papers with balanced distribution...")
+        
+        # Calculate target chunks for each temporal category
+        old_chunks_needed = remaining_chunks_needed // 2
+        new_chunks_needed = remaining_chunks_needed - old_chunks_needed
+        
+        print(f"📊 Target distribution: {old_chunks_needed} old papers, {new_chunks_needed} new papers")
+        
+        # Select old papers
+        old_selected = 0
+        for paper, score in old_papers_scored:
+            if old_selected >= old_chunks_needed:
+                break
+                
             paper_id = self._get_paper_identifier(paper.get('metadata', {}))
-            if paper_id not in used_papers:
-                old_papers_selected.append(paper)
+            if paper_id and paper_id not in used_papers:
+                selected_papers.append(paper)
                 used_papers.add(paper_id)
-
-        # Add new papers
-        new_papers_selected = []
-        for paper, score in new_papers_scored[:chunks_per_category]:
+                old_selected += 1
+        
+        # Select new papers
+        new_selected = 0
+        for paper, score in new_papers_scored:
+            if new_selected >= new_chunks_needed:
+                break
+                
             paper_id = self._get_paper_identifier(paper.get('metadata', {}))
-            if paper_id not in used_papers:
-                new_papers_selected.append(paper)
+            if paper_id and paper_id not in used_papers:
+                selected_papers.append(paper)
                 used_papers.add(paper_id)
-
-        # Combine all selected papers
-        final_selection = selected_papers + old_papers_selected + new_papers_selected
-
-        print(f"✅ Final selection: {len(final_selection)} papers")
-        print(f"   📊 Lab papers: {len([p for p in selected_papers if self.is_lab_authored_paper(p.get('metadata', {}))])}")
-        print(f"   📊 Preferred author papers: {len([p for p in selected_papers if not self.is_lab_authored_paper(p.get('metadata', {}))])}")
-        print(f"   📊 Old papers (≤{median_year:.0f}): {len(old_papers_selected)}")
-        print(f"   📊 New papers (>{median_year:.0f}): {len(new_papers_selected)}")
-
-        # Step 8: Fallback mechanism if selection is insufficient
-        if len(final_selection) < top_k * 0.8:  # If we have less than 80% of target
-            print(f"⚠️  Insufficient papers selected ({len(final_selection)}/{top_k}), activating fallback...")
+                new_selected += 1
+        
+        print(f"✅ Selected {old_selected} old papers and {new_selected} new papers")
+        
+        # If we don't have enough papers, fill with remaining high-scoring papers
+        if len(selected_papers) < top_k:
+            remaining_needed = top_k - len(selected_papers)
+            print(f"⚠️  Need {remaining_needed} more papers, filling with remaining high-scoring papers...")
             
-            # Randomly select from remaining papers to fill the gap
-            remaining_papers = [p for p in other_papers if self._get_paper_identifier(p.get('metadata', {})) not in used_papers]
-            random.shuffle(remaining_papers)
+            # Combine remaining papers and sort by score
+            remaining_papers = []
+            for paper, score in old_papers_scored:
+                if paper not in selected_papers:
+                    remaining_papers.append((paper, score))
+            for paper, score in new_papers_scored:
+                if paper not in selected_papers:
+                    remaining_papers.append((paper, score))
             
-            additional_needed = top_k - len(final_selection)
-            additional_papers = remaining_papers[:additional_needed]
-            
-            final_selection.extend(additional_papers)
-            print(f"🔄 Fallback added {len(additional_papers)} additional papers")
+            # Sort by score and add until we reach target
+            remaining_papers.sort(key=lambda x: x[1], reverse=True)
+            for paper, score in remaining_papers:
+                if len(selected_papers) >= top_k:
+                    break
+                    
+                paper_id = self._get_paper_identifier(paper.get('metadata', {}))
+                if paper_id and paper_id not in used_papers:
+                    selected_papers.append(paper)
+                    used_papers.add(paper_id)
 
-        return final_selection[:top_k]
+        # Step 9: Final statistics and validation
+        print(f"📊 Final selection statistics:")
+        print(f"   Total papers selected: {len(selected_papers)}")
+        print(f"   Lab papers: {sum(1 for p in selected_papers if self.is_lab_authored_paper(p.get('metadata', {})))}")
+        print(f"   Preferred author papers: {sum(1 for p in selected_papers if preferred_authors and self._is_preferred_author_paper(p.get('metadata', {}), preferred_authors))}")
+        
+        # Count preprint papers in final selection
+        final_preprint_count = sum(1 for p in selected_papers 
+                                  if p.get('metadata', {}).get('is_preprint', False))
+        print(f"   Preprint papers: {final_preprint_count} (deprioritized)")
+        
+        # Show preprint distribution by type
+        preprint_types = {}
+        for paper in selected_papers:
+            metadata = paper.get('metadata', {})
+            if metadata.get('is_preprint', False):
+                preprint_type = metadata.get('preprint_type', 'unknown')
+                preprint_types[preprint_type] = preprint_types.get(preprint_type, 0) + 1
+        
+        if preprint_types:
+            print(f"   Preprint types: {', '.join([f'{k}: {v}' for k, v in preprint_types.items()])}")
+        
+        # Validate we have enough papers
+        if len(selected_papers) < top_k:
+            print(f"⚠️  Warning: Only found {len(selected_papers)} papers (requested {top_k})")
+        elif len(selected_papers) > top_k:
+            print(f"📊 Note: Selected {len(selected_papers)} papers (requested {top_k})")
+        
+        # Return the selected papers
+        return selected_papers
 
     def _is_preferred_author_paper(self, metadata, preferred_authors):
-        """Check if a paper is authored by any of the preferred authors."""
+        """Check if a paper is authored by preferred authors."""
         if not preferred_authors:
             return False
-            
-        authors = metadata.get('author', metadata.get('authors', '')).lower()
+        
+        authors = metadata.get('author', metadata.get('authors', ''))
         if not authors:
             return False
-            
-        for author in preferred_authors:
-            author_lower = author.lower()
-            # Check for exact name match or partial match
-            if author_lower in authors or any(part in authors for part in author_lower.split()):
+        
+        # Convert to string if it's a list
+        if isinstance(authors, list):
+            authors = '; '.join(authors)
+        
+        authors_lower = str(authors).lower()
+        
+        for preferred_author in preferred_authors:
+            if preferred_author.lower() in authors_lower:
                 return True
-                
+        
         return False
+
+    def detect_preprint_status(self, metadata):
+        """
+        Detect preprint status from existing metadata fields.
+        
+        Args:
+            metadata: Paper metadata dictionary
+            
+        Returns:
+            tuple: (is_preprint: bool, preprint_type: str, preprint_score: float)
+        """
+        preprint_score = 0.0
+        preprint_type = "unknown"
+        
+        # Check source field first (most reliable)
+        source = metadata.get('source', '').lower()
+        if source in ["biorxiv", "medrxiv", "arxiv", "chemrxiv", "preprints"]:
+            preprint_score += 0.8
+            preprint_type = source
+        
+        # Check journal name for preprint indicators
+        journal = metadata.get('journal', '').lower()
+        if journal:
+            preprint_indicators = [
+                "arxiv", "biorxiv", "medrxiv", "chemrxiv", "preprint", 
+                "working paper", "manuscript", "draft"
+            ]
+            for indicator in preprint_indicators:
+                if indicator in journal:
+                    preprint_score += 0.6
+                    preprint_type = "preprint_server"
+                    break
+        
+        # Check if it's from a preprint server origin
+        origin = metadata.get('origin', '').lower()
+        if origin in ["biorxiv", "medrxiv", "chemrxiv", "preprints"]:
+            preprint_score += 0.9
+            preprint_type = origin
+        
+        # Check version information
+        version = metadata.get('version', '')
+        if version and version != "1":
+            preprint_score += 0.3
+            preprint_type = "versioned_preprint"
+        
+        # Check status
+        status = metadata.get('status', '').lower()
+        if status in ["submitted", "pending", "working"]:
+            preprint_score += 0.4
+            preprint_type = "submitted_preprint"
+        
+        # Determine final classification
+        is_preprint = preprint_score >= 0.5
+        
+        return is_preprint, preprint_type, preprint_score
+
+    def add_preprint_metadata(self, metadata):
+        """
+        Add preprint metadata to paper metadata if not present.
+        
+        Args:
+            metadata: Paper metadata dictionary
+            
+        Returns:
+            dict: Updated metadata with preprint information
+        """
+        if 'is_preprint' not in metadata:
+            is_preprint, preprint_type, preprint_score = self.detect_preprint_status(metadata)
+            metadata['is_preprint'] = is_preprint
+            metadata['preprint_type'] = preprint_type
+            metadata['preprint_score'] = preprint_score
+        
+        return metadata
 
     def _get_journal_impact_factor(self, journal_name):
         """

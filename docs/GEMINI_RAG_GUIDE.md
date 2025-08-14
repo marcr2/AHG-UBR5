@@ -157,7 +157,7 @@ The system is specifically tailored for Dr. Xiaojing Ma's lab research:
 
 1. **"No embeddings data available"**
    - Run embedding generation scripts first
-   - Check that `pubmed_embeddings.json` or `xrvix_embeddings.json` exist
+   - Check that `xrvix_embeddings/pubmed_embeddings.json` or `xrvix_embeddings.json` exist
 
 2. **"Gemini client not available"**
    - Check your `GEMINI_API_KEY` in `keys.json`

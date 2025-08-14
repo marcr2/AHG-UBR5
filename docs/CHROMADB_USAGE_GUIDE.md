@@ -53,7 +53,7 @@ manager = ChromaDBManager()
 manager.create_collection()
 
 # Load and add embeddings
-pubmed_data = manager.load_embeddings_from_json("pubmed_embeddings.json")
+pubmed_data = manager.load_embeddings_from_json("xrvix_embeddings/pubmed_embeddings.json")
 manager.add_embeddings_to_collection(pubmed_data, "pubmed")
 
 # Search for similar embeddings

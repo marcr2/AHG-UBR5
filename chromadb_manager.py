@@ -763,10 +763,10 @@ def main():
         else:
             print("❌ Failed to load multi-file embeddings")
     
-    # Load and add PubMed embeddings (legacy single file)
-    if os.path.exists("pubmed_embeddings.json"):
-        print("🔄 Loading PubMed embeddings from single file...")
-        pubmed_data = manager.load_embeddings_from_json("pubmed_embeddings.json")
+    # Load and add PubMed embeddings from xrvix_embeddings folder
+    if os.path.exists("xrvix_embeddings/pubmed_embeddings.json"):
+        print("🔄 Loading PubMed embeddings from xrvix_embeddings folder...")
+        pubmed_data = manager.load_embeddings_from_json("xrvix_embeddings/pubmed_embeddings.json")
         if pubmed_data:
             manager.add_embeddings_to_collection(pubmed_data, "pubmed")
             print("✅ Successfully loaded PubMed embeddings")

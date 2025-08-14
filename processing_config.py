@@ -14,9 +14,10 @@ MAX_CHUNK_LENGTH = 8000  # Maximum chunk length for text splitting
 SAVE_INTERVAL = 1000  # Save progress every N papers
 
 # --- CITATION PROCESSING OPTIMIZATION ---
-CITATION_MAX_WORKERS = 20  # Maximum parallel workers for citation processing
-CITATION_TIMEOUT = 10  # Timeout per citation request (seconds)
-CITATION_BATCH_SIZE = 500  # Process citations in batches of 500 for optimal speed
+CITATION_MAX_WORKERS = 1  # Single worker for immediate processing (no parallel needed)
+CITATION_TIMEOUT = 5  # Timeout per citation request (seconds) - balanced for reliability
+CITATION_BATCH_SIZE = 1  # Process citations immediately (no batching needed)
+CITATION_RATE_LIMIT = 0.5  # 500ms between citation requests to avoid overwhelming APIs
 
 # --- VECTOR DATABASE CONFIG ---
 DB_BATCH_SIZE = 5000  # Number of embeddings to add to ChromaDB in one operation (max allowed by ChromaDB is 5461)
@@ -70,7 +71,13 @@ def print_config_info():
     print(f"   Rate limit delay: {RATE_LIMIT_DELAY}s")
     print(f"   Sources: {', '.join(DUMPS)}")
     print()
+    print("📊 Citation Processing:")
+    print(f"   Citation workers: {CITATION_MAX_WORKERS} (immediate processing)")
+    print(f"   Citation timeout: {CITATION_TIMEOUT}s")
+    print(f"   Citation rate limit: {CITATION_RATE_LIMIT}s between requests")
+    print()
     print("💡 Performance Tips:")
+    print("   - Citations are processed immediately for each paper")
     print("   - Use 'rate_limit_safe' if hitting 429 errors")
     print("   - Increase MAX_WORKERS for faster processing (if API allows)")
     print("   - Decrease REQUEST_TIMEOUT if getting timeouts")

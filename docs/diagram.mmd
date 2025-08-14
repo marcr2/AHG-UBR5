@@ -11,7 +11,7 @@ graph TD
 
   subgraph CLI Pipeline
     MP["master_processor.py"] --> PS["pubmed_scraper_json.py"]
-    PS --> PE["pubmed_embeddings.json"]
+    PS --> PE["xrvix_embeddings/pubmed_embeddings.json"]
     MP --> CM["ChromaDBManager<br/>create_collection + add_embeddings"]
     CM --> DB
     MP --> PX

@@ -78,7 +78,7 @@ The system uses ChromaDB as a persistent vector database that stores embeddings 
 ### Data Location
 
 * ChromaDB data is stored in: `./chroma_db/`
-* Embedding files are stored in: `./pubmed_embeddings.json` and `./xrvix_embeddings/`
+* Embedding files are stored in: `./xrvix_embeddings/` (includes both PubMed and xrvix embeddings)
 * The system automatically detects if ChromaDB has data and skips reloading
 
 ## Enhanced Metadata Collection
