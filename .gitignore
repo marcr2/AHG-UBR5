@@ -15,6 +15,7 @@ hypothesis_export/
 .vscode/
 
 # Data directories
+data/
 xrvix_embeddings/
 chroma_db/
 # PubMed embeddings are now stored in xrvix_embeddings folder
@@ -24,6 +25,7 @@ embed_backup/
 paperscraper_dumps/
 
 # Cache directories
+__pycache__/
 __pycache__/
 _pycache_/
 
@@ -57,6 +59,7 @@ var/
 *.egg-info/
 .installed.cfg
 *.egg
+*.zip
 
 # Virtual environments
 env/

@@ -22,7 +22,7 @@ def show_menu():
     print("3.  UBR5 API Scraper (Scholarly + Semantic Scholar)")
     print("4.  Scholarly API Scraper (Google Scholar)")
     print("5.  Semantic Scholar API Scraper")
-    print("6.  🚀 Unified Paper Scraper (PubMed + UBR5) - RECOMMENDED")
+    print("6.  Unified Paper Scraper (PubMed + Google scholar + Semantic Scholar)")
     
     print("\n🗄️ VECTOR DATABASE MANAGEMENT:")
     print("7.  Initialize ChromaDB")
@@ -86,10 +86,10 @@ def load_data_into_vector_db():
         
         total_loaded = 0
         
-        # Load PubMed embeddings from xrvix_embeddings folder
-        if os.path.exists("xrvix_embeddings/pubmed_embeddings.json"):
+        # Load PubMed embeddings from data/embeddings/xrvix_embeddings folder
+        if os.path.exists("data/embeddings/xrvix_embeddings/pubmed_embeddings.json"):
             print("🔄 Loading PubMed embeddings...")
-            pubmed_data = manager.load_embeddings_from_json("xrvix_embeddings/pubmed_embeddings.json")
+            pubmed_data = manager.load_embeddings_from_json("data/embeddings/xrvix_embeddings/pubmed_embeddings.json")
             if pubmed_data:
                 if manager.add_embeddings_to_collection(pubmed_data, "pubmed"):
                     total_loaded += len(pubmed_data.get('embeddings', []))
@@ -100,9 +100,9 @@ def load_data_into_vector_db():
                 print("❌ Failed to load PubMed data")
         
         # Load xrvix embeddings (multi-file)
-        if os.path.exists("xrvix_embeddings"):
+        if os.path.exists("data/embeddings/xrvix_embeddings"):
             print("🔄 Loading xrvix embeddings...")
-            if manager.add_embeddings_from_directory("xrvix_embeddings", db_batch_size=DB_BATCH_SIZE):
+            if manager.add_embeddings_from_directory("data/embeddings/xrvix_embeddings", db_batch_size=DB_BATCH_SIZE):
                 stats = manager.get_collection_stats()
                 total_docs = stats.get('total_documents', 0)
                 print(f"✅ Loaded xrvix embeddings (total documents: {total_docs})")
@@ -201,12 +201,12 @@ def show_data_status():
     
     # Check PubMed data
     print("\n📚 PubMed Data:")
-    if os.path.exists("xrvix_embeddings/pubmed_embeddings.json"):
+    if os.path.exists("data/embeddings/xrvix_embeddings/pubmed_embeddings.json"):
         try:
-            with open("xrvix_embeddings/pubmed_embeddings.json", 'r') as f:
+            with open("data/embeddings/xrvix_embeddings/pubmed_embeddings.json", 'r') as f:
                 pubmed_data = json.load(f)
                 pubmed_count = len(pubmed_data.get('embeddings', []))
-                size = os.path.getsize("xrvix_embeddings/pubmed_embeddings.json") / 1024
+                size = os.path.getsize("data/embeddings/xrvix_embeddings/pubmed_embeddings.json") / 1024
                 print(f"   ✅ Available: {pubmed_count} papers ({size:.1f} KB)")
                 print(f"   📊 Chunks: {len(pubmed_data.get('chunks', []))}")
                 print(f"   📊 Metadata: {len(pubmed_data.get('metadata', []))}")
@@ -217,8 +217,8 @@ def show_data_status():
     
     # Check xrvix data
     print("\n📄 xrvix Data (biorxiv, medrxiv):")
-    if os.path.exists("xrvix_embeddings"):
-        metadata_path = os.path.join("xrvix_embeddings", "metadata.json")
+    if os.path.exists("data/embeddings/xrvix_embeddings"):
+        metadata_path = os.path.join("data/embeddings/xrvix_embeddings", "metadata.json")
         if os.path.exists(metadata_path):
             try:
                 with open(metadata_path, 'r') as f:
@@ -228,8 +228,8 @@ def show_data_status():
                     print(f"   ✅ Available: {xrvix_count} papers (metadata: {file_size:.1f} MB)")
                     
                     # Check batch files
-                    biorxiv_dir = os.path.join("xrvix_embeddings", "biorxiv")
-                    medrxiv_dir = os.path.join("xrvix_embeddings", "medrxiv")
+                    biorxiv_dir = os.path.join("data/embeddings/xrvix_embeddings", "biorxiv")
+                    medrxiv_dir = os.path.join("data/embeddings/xrvix_embeddings", "medrxiv")
                     
                     if os.path.exists(biorxiv_dir):
                         batch_files = [f for f in os.listdir(biorxiv_dir) if f.startswith("batch_") and f.endswith(".json")]
@@ -248,7 +248,7 @@ def show_data_status():
     
     # Check UBR5 data
     print("\n🔬 UBR5 Data (Semantic Scholar + Google Scholar):")
-    ubr5_dir = "xrvix_embeddings/ubr5_api"
+    ubr5_dir = "data/embeddings/xrvix_embeddings/ubr5_api"
     if os.path.exists(ubr5_dir):
         metadata_file = os.path.join(ubr5_dir, "metadata.json")
         if os.path.exists(metadata_file):
@@ -272,7 +272,7 @@ def show_data_status():
     
     # Check ChromaDB
     print("\n🗄️  ChromaDB Vector Database:")
-    if os.path.exists("chroma_db"):
+    if os.path.exists("data/vector_db/chroma_db"):
         try:
             manager = ChromaDBManager()
             collections = manager.list_collections()
@@ -292,11 +292,11 @@ def show_data_status():
     # Summary
     print("\n📈 Summary:")
     total_sources = 0
-    if os.path.exists("xrvix_embeddings/pubmed_embeddings.json"):
+    if os.path.exists("data/embeddings/xrvix_embeddings/pubmed_embeddings.json"):
         total_sources += 1
-    if os.path.exists("xrvix_embeddings/metadata.json"):
+    if os.path.exists("data/embeddings/xrvix_embeddings/metadata.json"):
         total_sources += 1
-    if os.path.exists("xrvix_embeddings/ubr5_api/metadata.json"):
+    if os.path.exists("data/embeddings/xrvix_embeddings/ubr5_api/metadata.json"):
         total_sources += 1
     
     print(f"   📊 Data sources available: {total_sources}/3")
@@ -310,9 +310,9 @@ def show_data_status():
     print("\n💡 Recommendations:")
     if total_sources < 3:
         print("   • Use option 12 (Unified Scraper) to collect all missing data sources")
-    if total_sources > 0 and not os.path.exists("chroma_db"):
+    if total_sources > 0 and not os.path.exists("data/vector_db/chroma_db"):
         print("   • Use option 4 to load data into ChromaDB")
-    if os.path.exists("chroma_db"):
+    if os.path.exists("data/vector_db/chroma_db"):
         print("   • Use option 7 to start the Enhanced RAG System for AI-powered research")
 
 def check_chromadb_status():
@@ -325,7 +325,7 @@ def check_chromadb_status():
         manager = ChromaDBManager()
         
         # Check if ChromaDB directory exists
-        if not os.path.exists("chroma_db"):
+        if not os.path.exists("data/vector_db/chroma_db"):
             print("❌ ChromaDB directory not found")
             print("💡 ChromaDB will be created when you first load data")
             return
@@ -370,7 +370,7 @@ def check_chromadb_status():
                 if metadata_keys:
                     print(f"   🔑 Metadata keys: {', '.join(metadata_keys[:5])}{'...' if len(metadata_keys) > 5 else ''}")
         
-        print(f"\n💡 ChromaDB uses persistent storage - data is saved locally in ./chroma_db/")
+        print(f"\n💡 ChromaDB uses persistent storage - data is saved locally in ./data/vector_db/chroma_db/")
         print("   You can use the Enhanced RAG System directly without reloading data!")
         
     except Exception as e:

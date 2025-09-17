@@ -26,7 +26,7 @@ class ChromaDBManager:
     - Support for new multi-file storage system
     """
     
-    def __init__(self, persist_directory: str = "./chroma_db", collection_name: str = "pubmed_papers"):
+    def __init__(self, persist_directory: str = "./data/vector_db/chroma_db", collection_name: str = "pubmed_papers"):
         """
         Initialize the ChromaDB manager.
         
@@ -755,18 +755,18 @@ def main():
         return
     
     # Load and add embeddings from multi-file structure
-    if os.path.exists("xrvix_embeddings"):
+    if os.path.exists("data/embeddings/xrvix_embeddings"):
         print("🔄 Loading embeddings from multi-file structure...")
-        success = manager.add_embeddings_from_directory("xrvix_embeddings")
+        success = manager.add_embeddings_from_directory("data/embeddings/xrvix_embeddings")
         if success:
             print("✅ Successfully loaded multi-file embeddings")
         else:
             print("❌ Failed to load multi-file embeddings")
     
-    # Load and add PubMed embeddings from xrvix_embeddings folder
-    if os.path.exists("xrvix_embeddings/pubmed_embeddings.json"):
-        print("🔄 Loading PubMed embeddings from xrvix_embeddings folder...")
-        pubmed_data = manager.load_embeddings_from_json("xrvix_embeddings/pubmed_embeddings.json")
+    # Load and add PubMed embeddings from data/embeddings/xrvix_embeddings folder
+    if os.path.exists("data/embeddings/xrvix_embeddings/pubmed_embeddings.json"):
+        print("🔄 Loading PubMed embeddings from data/embeddings/xrvix_embeddings folder...")
+        pubmed_data = manager.load_embeddings_from_json("data/embeddings/xrvix_embeddings/pubmed_embeddings.json")
         if pubmed_data:
             manager.add_embeddings_to_collection(pubmed_data, "pubmed")
             print("✅ Successfully loaded PubMed embeddings")

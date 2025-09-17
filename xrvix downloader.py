@@ -5,7 +5,7 @@ from tqdm.auto import tqdm
 import time
 
 # Define custom download directory within AHG-UBR5
-CUSTOM_DUMP_DIR = "paperscraper_dumps"
+CUSTOM_DUMP_DIR = "data/scraped_data/paperscraper_dumps"
 
 def ensure_dump_directory():
     """Ensure the custom dump directory exists"""

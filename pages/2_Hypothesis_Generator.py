@@ -82,7 +82,7 @@ def load_embeddings_bg():
         logger.info("Starting embedding loading background thread...")
         # --- Count total number of batches for tqdm ---
         batch_count = 0
-        embeddings_dir = "xrvix_embeddings"
+        embeddings_dir = "data/embeddings/xrvix_embeddings"
         if os.path.exists(embeddings_dir):
             for source_dir in os.listdir(embeddings_dir):
                 source_path = os.path.join(embeddings_dir, source_dir)

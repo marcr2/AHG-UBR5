@@ -1352,10 +1352,10 @@ if PAPERSCRAPER_AVAILABLE:
     try:
         DUMP_ROOT = pkg_resources.resource_filename("paperscraper", "server_dumps")
     except Exception:
-        DUMP_ROOT = "paperscraper_dumps"  # Fallback to local directory
+        DUMP_ROOT = "data/scraped_data/paperscraper_dumps"  # Fallback to local directory
 else:
-    DUMP_ROOT = "paperscraper_dumps"  # Use local directory when paperscraper not available
-EMBEDDINGS_DIR = "xrvix_embeddings"
+    DUMP_ROOT = "data/scraped_data/paperscraper_dumps"  # Use local directory when paperscraper not available
+EMBEDDINGS_DIR = "data/embeddings/xrvix_embeddings"
 
 # Rate limiting settings
 # Different limits for different API endpoints

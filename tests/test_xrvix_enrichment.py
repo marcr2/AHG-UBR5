@@ -79,7 +79,7 @@ def test_enrich_batch_metadata_from_citations_updates_pending_only():
 
 
 def test_enrich_all_batches_metadata_from_citations_sweeps_dir(tmp_path):
-    embeddings_dir = tmp_path / "xrvix_embeddings"
+    embeddings_dir = tmp_path / "data" / "embeddings" / "xrvix_embeddings"
     os.makedirs(embeddings_dir, exist_ok=True)
 
     # Create two batch files with pending fields

@@ -305,9 +305,9 @@ class EnhancedRAGQuery:
         total_chunks = 0
 
         # Load PubMed embeddings (single file)
-        if os.path.exists("xrvix_embeddings/pubmed_embeddings.json"):
-            logger.info(f"🔄 Loading pubmed_embeddings.json from xrvix_embeddings folder...")
-            data = self.load_embeddings_from_json("xrvix_embeddings/pubmed_embeddings.json")
+        if os.path.exists("data/embeddings/xrvix_embeddings/pubmed_embeddings.json"):
+            logger.info(f"🔄 Loading pubmed_embeddings.json from data/embeddings/xrvix_embeddings folder...")
+            data = self.load_embeddings_from_json("data/embeddings/xrvix_embeddings/pubmed_embeddings.json")
             if data:
                 # Add source prefix to metadata with progress bar
                 with tqdm(total=len(data["metadata"]), desc="Adding source prefix to PubMed metadata", unit="entry") as meta_pbar:
@@ -330,7 +330,7 @@ class EnhancedRAGQuery:
                 total_chunks += len(data["chunks"])
 
         # Load xrvix embeddings (batch-based system)
-        xrvix_dir = "xrvix_embeddings"
+        xrvix_dir = "data/embeddings/xrvix_embeddings"
         if os.path.exists(xrvix_dir):
             logger.info(f"🔄 Loading xrvix embeddings from {xrvix_dir}...")
 

@@ -46,7 +46,7 @@ class UBR5APIScraper:
             api_keys: Dictionary containing API keys for different services
         """
         self.api_keys = api_keys or {}
-        self.embeddings_dir = "xrvix_embeddings"
+        self.embeddings_dir = "data/embeddings/xrvix_embeddings"
         self.papers_data = []
         self.processed_dois = set()
         
@@ -322,6 +322,9 @@ class UBR5APIScraper:
                 except Exception:
                     is_preprint = False
             
+            # Extract impact factor
+            impact_factor = self._get_impact_factor(venue)
+            
             # Create processed paper
             processed_paper = {
                 "title": title,
@@ -332,6 +335,7 @@ class UBR5APIScraper:
                 "abstract": abstract,
                 "citation_count": str(citation_count) if citation_count else "0",
                 "reference_count": str(reference_count) if reference_count else "0",
+                "impact_factor": impact_factor,
                 "fields_of_study": fields_of_study,
                 "publication_types": publication_types,
                 "is_preprint": is_preprint,
@@ -498,6 +502,9 @@ class UBR5APIScraper:
             # Check if it's a preprint
             is_preprint = "preprint" in pub_type.lower() or "working" in pub_type.lower()
             
+            # Extract impact factor
+            impact_factor = self._get_impact_factor(venue)
+            
             # Create processed paper
             processed_paper = {
                 "title": title,
@@ -508,6 +515,7 @@ class UBR5APIScraper:
                 "abstract": abstract,
                 "citation_count": str(citation_count) if citation_count else "0",
                 "reference_count": "0",  # Google Scholar doesn't provide this
+                "impact_factor": impact_factor,
                 "fields_of_study": [],
                 "publication_types": [pub_type] if pub_type else [],
                 "is_preprint": is_preprint,
@@ -523,6 +531,190 @@ class UBR5APIScraper:
         except Exception as e:
             logger.error(f"❌ Error processing scholarly paper: {e}")
             return None
+    
+    def _get_impact_factor(self, journal_name: str) -> str:
+        """
+        Get impact factor for a journal using the same comprehensive database as PubMed scraper.
+        
+        Args:
+            journal_name: Name of the journal
+            
+        Returns:
+            Impact factor as string or "not found"
+        """
+        if not journal_name or journal_name == "Unknown journal":
+            return "not found"
+        
+        # Comprehensive impact factor mapping based on recent data (2023-2024)
+        impact_factors = {
+            # Top-tier journals
+            'nature': 49.962,
+            'science': 56.9,
+            'cell': 66.85,
+            'nature medicine': 87.241,
+            'nature biotechnology': 68.164,
+            'nature genetics': 41.307,
+            'nature cell biology': 28.213,
+            'nature immunology': 31.25,
+            'nature reviews immunology': 108.555,
+            'nature reviews molecular cell biology': 81.3,
+            'nature reviews genetics': 42.7,
+            'nature reviews cancer': 75.4,
+            'nature reviews drug discovery': 120.1,
+            
+            # Immunology journals
+            'immunity': 43.474,
+            'journal of immunology': 5.422,
+            'journal of experimental medicine': 17.579,
+            'nature immunology': 31.25,
+            'immunological reviews': 13.0,
+            'trends in immunology': 13.1,
+            'european journal of immunology': 5.4,
+            'journal of allergy and clinical immunology': 14.2,
+            
+            # General science journals
+            'proceedings of the national academy of sciences': 12.779,
+            'pnas': 12.779,
+            'plos one': 3.752,
+            'plos biology': 9.593,
+            'plos genetics': 6.02,
+            'plos computational biology': 4.7,
+            'elife': 8.713,
+            
+            # Bioinformatics and computational biology
+            'bioinformatics': 6.937,
+            'nucleic acids research': 19.16,
+            'genome research': 11.093,
+            'genome biology': 17.906,
+            'bmc genomics': 4.317,
+            'bmc bioinformatics': 3.169,
+            'briefings in bioinformatics': 13.9,
+            'bioinformatics and biology insights': 2.1,
+            
+            # Cell biology journals
+            'cell reports': 9.995,
+            'molecular cell': 19.328,
+            'developmental cell': 13.417,
+            'current biology': 10.834,
+            'cell metabolism': 29.0,
+            'cell stem cell': 25.3,
+            'cancer cell': 50.3,
+            'molecular biology of the cell': 3.9,
+            
+            # Nature family journals
+            'nature communications': 17.694,
+            'nature methods': 47.99,
+            'nature neuroscience': 25.0,
+            'nature structural & molecular biology': 15.8,
+            'nature chemical biology': 15.0,
+            'nature materials': 41.2,
+            'nature physics': 20.5,
+            'nature chemistry': 24.4,
+            
+            # Neuroscience journals
+            'neuron': 16.2,
+            'journal of neuroscience': 6.7,
+            'nature neuroscience': 25.0,
+            'trends in neurosciences': 16.2,
+            'cerebral cortex': 4.9,
+            'neuroimage': 7.4,
+            
+            # Medical journals
+            'the lancet': 202.731,
+            'new england journal of medicine': 176.079,
+            'jama': 157.335,
+            'bmj': 105.7,
+            'nature medicine': 87.241,
+            'cell metabolism': 29.0,
+            'diabetes': 8.0,
+            'circulation': 37.8,
+            
+            # Preprint servers (no impact factor)
+            'biorxiv': 0.0,
+            'medrxiv': 0.0,
+            'arxiv': 0.0,
+            'chemrxiv': 0.0,
+            'bioarxiv': 0.0,
+            
+            # Biochemistry journals
+            'journal of biological chemistry': 5.5,
+            'biochemistry': 3.2,
+            'protein science': 6.3,
+            'journal of molecular biology': 5.0,
+            'structure': 4.2,
+            
+            # Genetics journals
+            'genetics': 4.4,
+            'genome research': 11.093,
+            'genome biology': 17.906,
+            'human molecular genetics': 5.1,
+            'american journal of human genetics': 11.0,
+            
+            # Cancer journals
+            'cancer cell': 50.3,
+            'cancer research': 13.3,
+            'journal of clinical oncology': 50.7,
+            'nature cancer': 23.0,
+            'cancer discovery': 28.2,
+            
+            # Microbiology journals
+            'cell host & microbe': 30.3,
+            'nature microbiology': 20.5,
+            'journal of bacteriology': 3.2,
+            'applied and environmental microbiology': 4.4,
+            
+            # Plant biology journals
+            'plant cell': 12.1,
+            'plant journal': 7.0,
+            'plant physiology': 8.0,
+            'nature plants': 15.8,
+            
+            # Other specialized journals
+            'journal of proteome research': 4.4,
+            'proteomics': 4.0,
+            'mass spectrometry reviews': 8.0,
+            'analytical chemistry': 8.0,
+            'journal of chromatography a': 4.1,
+        }
+        
+        journal_lower = journal_name.lower().strip()
+        
+        # Direct match
+        if journal_lower in impact_factors:
+            return str(impact_factors[journal_lower])
+        
+        # Partial match - check if any key is contained in the journal name
+        for key, impact in impact_factors.items():
+            if key in journal_lower or journal_lower in key:
+                return str(impact)
+        
+        # Fuzzy matching for common variations
+        journal_variations = {
+            'nature': ['nat ', 'nature '],
+            'science': ['science ', 'sci '],
+            'cell': ['cell ', 'cell:'],
+            'journal': ['j ', 'journal of', 'j.'],
+            'proceedings': ['proc ', 'proceedings of'],
+            'plos': ['plos ', 'public library of science'],
+            'bmc': ['bmc ', 'biomed central'],
+            'pnas': ['proc natl acad sci', 'proceedings of the national academy'],
+        }
+        
+        for base_name, variations in journal_variations.items():
+            for variation in variations:
+                if variation in journal_lower:
+                    if base_name in impact_factors:
+                        return str(impact_factors[base_name])
+        
+        # Default for unknown journals - estimate based on journal name patterns
+        if any(word in journal_lower for word in ['nature', 'science', 'cell']):
+            return "15.0"  # High-impact estimate
+        elif any(word in journal_lower for word in ['journal', 'proceedings', 'plos']):
+            return "5.0"   # Medium-impact estimate
+        elif any(word in journal_lower for word in ['bmc', 'frontiers', 'molecules']):
+            return "3.0"   # Lower-impact estimate
+        else:
+            return "not found"
     
     def search_ubr5_papers(self, max_papers: int = None) -> List[Dict]:
         """
@@ -816,7 +1008,7 @@ class UBR5APIScraper:
     
     def save_embeddings(self, papers_with_embeddings: List[Dict], source: str = "ubr5_api"):
         """
-        Save embeddings to the xrvix_embeddings folder.
+        Save embeddings to the data/embeddings/xrvix_embeddings folder.
         
         Args:
             papers_with_embeddings: List of papers with embeddings
