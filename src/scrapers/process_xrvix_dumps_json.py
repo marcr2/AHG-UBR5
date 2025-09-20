@@ -20,7 +20,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import random
-from processing_config import get_config, print_config_info, CITATION_MAX_WORKERS, CITATION_TIMEOUT, CITATION_BATCH_SIZE
+from src.core.processing_config import get_config, print_config_info, CITATION_MAX_WORKERS, CITATION_TIMEOUT, CITATION_BATCH_SIZE
 import warnings
 import logging
 import xml.etree.ElementTree as ET
@@ -48,7 +48,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('paper_processing.log')
+        logging.FileHandler('data/logs/paper_processing.log')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -128,6 +128,12 @@ except ImportError:
 def extract_impact_factor(paper_data, journal_name=None):
     """Extract impact factor using arXiv API + hybrid fallback."""
     logger.info(f"🔍 DEBUG: Extracting impact factor for paper with DOI: {paper_data.get('doi', 'None')}")
+    
+    # Check if this is a preprint first - preprints have no impact factor
+    is_preprint, preprint_type, preprint_score = is_preprint_paper(paper_data)
+    if is_preprint:
+        logger.info(f"🔍 DEBUG: Preprint detected, returning impact factor: 0.0")
+        return "0.0"  # Preprints have no impact factor
     
     # First, try to get impact factor directly from the data
     impact_fields = [
@@ -453,6 +459,17 @@ def process_citations_batch(papers_batch):
         if cached_result:
             return paper_key, cached_result
         
+        # Check if this is a preprint - skip expensive API calls for preprints
+        is_preprint, preprint_type, preprint_score = is_preprint_paper(row)
+        if is_preprint:
+            result = {
+                "citation_count": "0",  # Preprints typically have minimal citations
+                "journal": preprint_type.upper() if preprint_type in ["biorxiv", "medrxiv", "arxiv", "chemrxiv"] else "Preprint",
+                "impact_factor": "0.0",  # Preprints have no impact factor
+            }
+            cache_citation(paper_key, result)
+            return paper_key, result
+        
         try:
             # Strategy 1: Check if citation data is already in the paper_data (fastest)
             citation_fields = [
@@ -573,6 +590,18 @@ def process_citations_batch(papers_batch):
 
 def extract_journal_info_fast(paper_data):
     """Fast journal info extraction with minimal API calls."""
+    # Check if this is a preprint first - skip expensive operations for preprints
+    is_preprint, preprint_type, preprint_score = is_preprint_paper(paper_data)
+    if is_preprint:
+        # Return appropriate preprint server name
+        source = paper_data.get("source", "").lower()
+        if source in ["biorxiv", "medrxiv", "arxiv", "chemrxiv"]:
+            return source.upper()
+        elif preprint_type in ["biorxiv", "medrxiv", "arxiv", "chemrxiv"]:
+            return preprint_type.upper()
+        else:
+            return "Preprint"
+    
     # First check if journal info is already in the data
     journal_fields = ["journal", "journal_name", "publication_venue", "venue", "container_title"]
     
@@ -587,6 +616,11 @@ def extract_journal_info_fast(paper_data):
 
 def extract_impact_factor_fast(paper_data):
     """Fast impact factor extraction with minimal API calls."""
+    # Check if this is a preprint first - preprints have no impact factor
+    is_preprint, preprint_type, preprint_score = is_preprint_paper(paper_data)
+    if is_preprint:
+        return "0.0"  # Preprints have no impact factor
+    
     # First check if impact factor is already in the data
     impact_fields = ["impact_factor", "jcr_impact_factor", "sjr_impact_factor", "h_index"]
     
@@ -1111,6 +1145,21 @@ def extract_journal_info(paper_data):
     """Extract journal information using arXiv API + hybrid fallback."""
     logger.info(f"🔍 DEBUG: Extracting journal info for paper with DOI: {paper_data.get('doi', 'None')}")
     
+    # Check if this is a preprint first - skip expensive API calls for preprints
+    is_preprint, preprint_type, preprint_score = is_preprint_paper(paper_data)
+    if is_preprint:
+        # Return appropriate preprint server name
+        source = paper_data.get("source", "").lower()
+        if source in ["biorxiv", "medrxiv", "arxiv", "chemrxiv"]:
+            logger.info(f"🔍 DEBUG: Preprint detected, returning: {source.upper()}")
+            return source.upper()
+        elif preprint_type in ["biorxiv", "medrxiv", "arxiv", "chemrxiv"]:
+            logger.info(f"🔍 DEBUG: Preprint detected, returning: {preprint_type.upper()}")
+            return preprint_type.upper()
+        else:
+            logger.info(f"🔍 DEBUG: Preprint detected, returning: Preprint")
+            return "Preprint"
+    
     # First check if journal information is already in the paper_data
     journal_fields = [
         "journal", "journal_name", "publication", "source", "venue",
@@ -1323,7 +1372,7 @@ class LiveRatePlot:
 # --- CONFIG ---
 # Import optimized configuration
 try:
-    from processing_config import (
+    from src.core.processing_config import (
         MAX_WORKERS,
         BATCH_SIZE,
         RATE_LIMIT_DELAY,
@@ -2096,7 +2145,7 @@ def legacy_sequential_process_xrvix():
     from collections import deque
     import threading
     import time
-    from processing_config import PERFORMANCE_PROFILES
+    from src.core.processing_config import PERFORMANCE_PROFILES
 
     # Ask user if they want rate limit safe mode
     rate_limit_safe = False
@@ -2178,7 +2227,7 @@ def legacy_sequential_process_xrvix():
             plt.pause(0.01)
 
     # Load API key
-    with open("keys.json") as f:
+    with open("config/keys.json") as f:
         api_key = json.load(f)["GOOGLE_API_KEY"]
 
     # Setup directory structure
@@ -2777,7 +2826,7 @@ def main():
     logger.info("")
 
     # Load API key
-    with open("keys.json") as f:
+    with open("config/keys.json") as f:
         api_key = json.load(f)["GOOGLE_API_KEY"]
 
     # Setup directory structure

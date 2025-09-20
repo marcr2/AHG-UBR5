@@ -1,0 +1,66 @@
+{
+  "evaluation_criteria": [
+    "Scientific rigor and testability",
+    "Novelty and innovation",
+    "Feasibility and experimental design",
+    "Relevance to user's research",
+    "Clinical/translational potential",
+    "Statistical power and sample size",
+    "Ethical considerations"
+  ],
+  "scoring_scale": "0-5 (0=poor, 5=excellent)",
+  "focus_areas": [
+    "Molecular mechanisms",
+    "Experimental methodology",
+    "Literature alignment",
+    "Lab expertise match",
+    "Resource requirements",
+    "Timeline feasibility",
+    "Collaboration potential"
+  ],
+  "detailed_feedback": true,
+  "critique_tone": "constructive",
+  "emphasis_areas": {
+    "high_priority": [
+      "UBR-5 mechanistic insights",
+      "Cancer immunology relevance",
+      "Translational potential"
+    ],
+    "medium_priority": [
+      "Experimental feasibility",
+      "Literature support",
+      "Innovation level"
+    ],
+    "low_priority": [
+      "Minor methodological details",
+      "Citation formatting"
+    ]
+  },
+  "custom_instructions": "Focus on providing actionable feedback with specific recommendations for improvement.",
+  "scoring_guidelines": {
+    "novelty": {
+      "5": "Groundbreaking, completely novel approach",
+      "4": "Significant innovation with clear novelty",
+      "3": "Moderate novelty with some innovative elements",
+      "2": "Limited novelty, mostly incremental",
+      "1": "Minimal novelty, largely derivative",
+      "0": "No novelty, completely derivative"
+    },
+    "accuracy": {
+      "5": "Scientifically sound, well-supported by literature",
+      "4": "Mostly accurate with minor issues",
+      "3": "Generally accurate with some concerns",
+      "2": "Several accuracy issues present",
+      "1": "Multiple significant accuracy problems",
+      "0": "Fundamentally flawed or incorrect"
+    },
+    "relevancy": {
+      "5": "Highly relevant to UBR-5 research and lab goals",
+      "4": "Very relevant with clear connections",
+      "3": "Moderately relevant with some connections",
+      "2": "Limited relevance to current research",
+      "1": "Minimal relevance to lab focus",
+      "0": "Not relevant to UBR-5 or lab research"
+    }
+  }
+}

@@ -26,20 +26,33 @@ paperscraper_dumps/
 
 # Cache directories
 __pycache__/
-__pycache__/
-_pycache_/
+*.py[cod]
+*$py.class
 
 # Temporary test files
 test_api_key.py
 check_project.py
 
+# Test files
+test_*.py
+
+# Temporary files
+temp_*.jsonl
+temp_*.json
+temp_*.txt
+
+# One-time fix scripts (already executed)
+fix_embeddings_metadata.py
+quick_metadata_fix.py
+organize_data.py
+
+# Log files
+*.log
+
 # VSCode settings
 .vscode/
 
 # Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
 
 # C extensions
 *.so
@@ -88,6 +101,7 @@ nosetests.xml
 coverage.xml
 *.cover
 *.py,cover
+*.log
 
 # Translations
 *.mo

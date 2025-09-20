@@ -1,10 +1,10 @@
 # Core runtime
 streamlit>=1.32.0
 chromadb>=0.5.4
-google-genai>=0.6.0
-scikit-learn>=1.3.0
+google-generativeai>=0.8.0
+scikit-learn
 numpy>=1.24.0
-pandas>=2.0.0
+pandas
 requests>=2.31.0
 tqdm>=4.66.1
 openpyxl>=3.1.2
@@ -16,5 +16,8 @@ paperscraper
 
 # API scraping dependencies
 scholarly>=1.7.11
-semantic-scholar>=0.7.0
 paperscraper
+
+# Performance monitoring and optimization
+psutil>=5.9.0
+memory-profiler>=0.61.0

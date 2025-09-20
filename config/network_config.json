@@ -1,0 +1,35 @@
+{
+  "network_settings": {
+    "timeout": 30,
+    "max_retries": 3,
+    "retry_delay": 2,
+    "exponential_backoff": true,
+    "verify_ssl": false
+  },
+  "endpoints": {
+    "ncbi_eutils": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
+    "semantic_scholar": "https://api.semanticscholar.org/graph/v1/paper/search",
+    "google_api": "https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent"
+  },
+  "offline_mode": false,
+  "posthog_disabled": true,
+  "created_at": "2025-09-19T10:48:57.226086",
+  "connectivity_status": {
+    "ncbi_eutils": [
+      true,
+      "HTTP 405"
+    ],
+    "semantic_scholar": [
+      true,
+      "HTTP 400"
+    ],
+    "google_api": [
+      true,
+      "HTTP 404"
+    ],
+    "posthog": [
+      true,
+      "HTTP 400"
+    ]
+  }
+}

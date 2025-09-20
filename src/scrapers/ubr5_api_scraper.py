@@ -13,8 +13,9 @@ import hashlib
 import pickle
 from pathlib import Path
 import urllib.parse
-from processing_config import get_config, print_config_info
-from chromadb_manager import ChromaDBManager
+import signal
+from src.core.processing_config import get_config, print_config_info
+from src.core.chromadb_manager import ChromaDBManager
 
 # Set up logging
 logging.basicConfig(
@@ -22,7 +23,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('ubr5_api_scraping.log')
+        logging.FileHandler('data/logs/ubr5_api_scraping.log')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -34,8 +35,9 @@ warnings.filterwarnings("ignore", message=".*Could not find paper.*")
 
 class UBR5APIScraper:
     """
-    Comprehensive UBR5 paper scraper using Scholarly and Semantic Scholar APIs.
+    Comprehensive UBR5 paper scraper using Semantic Scholar API.
     Collects the same data and metadata as xrvix and PubMed scrapers.
+    Note: Google Scholar removed due to CAPTCHA/rate limiting issues.
     """
     
     def __init__(self, api_keys: Dict[str, str] = None):
@@ -60,9 +62,13 @@ class UBR5APIScraper:
         self.scholarly_base = "https://scholar.google.com"
         
         # Rate limiting configuration
-        self.rate_limit_delay = 0.1  # 100ms between requests
+        self.rate_limit_delay = 1.0  # 1 second between requests (increased for better reliability)
         self.max_retries = 3
         self.timeout = 30
+        self.semantic_scholar_rate_limit = 2.0  # 2 seconds between Semantic Scholar requests
+        
+        # Note: Google Scholar removed due to CAPTCHA/rate limiting issues
+        # Using Semantic Scholar as primary source (reliable, no CAPTCHA)
         
         # UBR5 search terms
         self.ubr5_search_terms = [
@@ -82,8 +88,28 @@ class UBR5APIScraper:
         # Initialize ChromaDB manager
         self.chromadb_manager = ChromaDBManager()
         self.chromadb_manager.create_collection()
+    
+    def _load_keywords_from_config(self):
+        """Load keywords from configuration file."""
+        import json
+        import os
         
-        logger.info("🔍 UBR5 API Scraper initialized successfully")
+        config_file = "config/search_keywords_config.json"
+        if os.path.exists(config_file):
+            try:
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+                semantic_keywords = config.get("semantic_keywords", "")
+                
+                if semantic_keywords:
+                    # Parse comma-separated keywords and clean them
+                    keywords = [keyword.strip() for keyword in semantic_keywords.split(',') if keyword.strip()]
+                    return keywords
+            except Exception as e:
+                logger.warning(f"Could not load keywords from config: {e}")
+        
+        return None
+        
     
     def check_api_key_availability(self) -> Dict[str, bool]:
         """
@@ -94,39 +120,91 @@ class UBR5APIScraper:
         """
         availability = {
             "google_api": bool(self.api_keys.get("GOOGLE_API_KEY")),
-            "scholar_api": bool(self.api_keys.get("SCHOLAR_API_KEY") or self.api_keys.get("GOOGLE_SCHOLAR_API_KEY")),
             "semantic_scholar": True,  # No API key required for basic usage
         }
         
         logger.info("🔑 API Key Availability:")
         logger.info(f"   Google API (embeddings): {'✅' if availability['google_api'] else '❌'}")
-        logger.info(f"   Scholar API: {'✅' if availability['scholar_api'] else '❌'}")
         logger.info(f"   Semantic Scholar: {'✅' if availability['semantic_scholar'] else '❌'}")
+        logger.info("   Google Scholar: ❌ Removed (CAPTCHA/rate limiting issues)")
         
         return availability
+    
+    def test_api_connectivity(self) -> Dict[str, bool]:
+        """
+        Test connectivity to various APIs.
+        
+        Returns:
+            Dictionary indicating which APIs are accessible
+        """
+        logger.info("🔍 Testing API connectivity...")
+        
+        connectivity = {
+            "semantic_scholar": False,
+            "google_api": False
+        }
+        
+        # Test Semantic Scholar API
+        try:
+            test_url = f"{self.semantic_scholar_v2_base}/paper/search"
+            test_params = {"query": "test", "limit": 1}
+            response = requests.get(test_url, params=test_params, timeout=10)
+            
+            if response.status_code == 200:
+                connectivity["semantic_scholar"] = True
+                logger.info("✅ Semantic Scholar API: Accessible")
+            else:
+                logger.warning(f"⚠️ Semantic Scholar API: HTTP {response.status_code}")
+        except Exception as e:
+            logger.warning(f"⚠️ Semantic Scholar API: Connection failed - {e}")
+        
+        # Test Google API (if key available)
+        google_api_key = self.api_keys.get("GOOGLE_API_KEY")
+        if google_api_key:
+            try:
+                test_url = "https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent"
+                test_data = {"content": {"parts": [{"text": "test"}]}}
+                test_params = {"key": google_api_key}
+                response = requests.post(test_url, json=test_data, params=test_params, timeout=10)
+                
+                if response.status_code == 200:
+                    connectivity["google_api"] = True
+                    logger.info("✅ Google API: Accessible")
+                else:
+                    logger.warning(f"⚠️ Google API: HTTP {response.status_code}")
+            except Exception as e:
+                logger.warning(f"⚠️ Google API: Connection failed - {e}")
+        else:
+            logger.info("ℹ️ Google API: No API key provided")
+        
+        # Google Scholar removed due to CAPTCHA/rate limiting issues
+        logger.info("ℹ️ Google Scholar: Removed (CAPTCHA/rate limiting issues)")
+        
+        return connectivity
+    
     
     def _load_api_keys(self):
         """Load API keys from keys.json file."""
         try:
-            with open("keys.json", 'r') as f:
+            with open("config/keys.json", 'r') as f:
                 keys_data = json.load(f)
                 self.api_keys.update(keys_data)
-                logger.info("✅ Loaded API keys from keys.json")
+                logger.info("✅ Loaded API keys from config/keys.json")
                 
                 # Log available API keys (without exposing the actual keys)
                 available_keys = list(keys_data.keys())
                 logger.info(f"📋 Available API keys: {', '.join(available_keys)}")
                 
         except FileNotFoundError:
-            logger.warning("⚠️ keys.json not found, using default configuration")
+            logger.warning("⚠️ config/keys.json not found, using default configuration")
         except json.JSONDecodeError:
-            logger.error("❌ Invalid JSON in keys.json")
+            logger.error("❌ Invalid JSON in config/keys.json")
         except Exception as e:
             logger.error(f"❌ Error loading API keys: {e}")
     
     def search_semantic_scholar(self, query: str, limit: int = 100) -> List[Dict]:
         """
-        Search for papers using Semantic Scholar API.
+        Search for papers using Semantic Scholar API with improved error handling and retry mechanism.
         
         Args:
             query: Search query string
@@ -140,6 +218,8 @@ class UBR5APIScraper:
         papers = []
         offset = 0
         batch_size = 100
+        consecutive_empty_responses = 0
+        max_consecutive_empty = 3
         
         # Ensure papers is properly initialized
         if papers is None:
@@ -156,11 +236,40 @@ class UBR5APIScraper:
                     "fields": "paperId,title,abstract,venue,year,authors,referenceCount,citationCount,openAccessPdf,publicationDate,publicationTypes,fieldsOfStudy,publicationVenue,externalIds"
                 }
                 
-                response = requests.get(url, params=params, timeout=self.timeout)
+                # Add retry mechanism with exponential backoff
+                response = None
+                for attempt in range(self.max_retries):
+                    try:
+                        response = requests.get(url, params=params, timeout=self.timeout)
+                        
+                        # Check if response is valid
+                        if response and response.content:
+                            consecutive_empty_responses = 0  # Reset counter on successful response
+                            break
+                        else:
+                            consecutive_empty_responses += 1
+                            logger.warning(f"⚠️ Empty response from Semantic Scholar API (attempt {attempt + 1}/{self.max_retries})")
+                            
+                            if consecutive_empty_responses >= max_consecutive_empty:
+                                logger.error(f"❌ Too many consecutive empty responses ({consecutive_empty_responses}), stopping search")
+                                return papers
+                            
+                            # Exponential backoff
+                            wait_time = (2 ** attempt) * self.rate_limit_delay
+                            logger.info(f"⏳ Waiting {wait_time:.1f}s before retry...")
+                            time.sleep(wait_time)
+                            
+                    except requests.exceptions.RequestException as e:
+                        logger.warning(f"⚠️ Request error (attempt {attempt + 1}/{self.max_retries}): {e}")
+                        if attempt < self.max_retries - 1:
+                            wait_time = (2 ** attempt) * self.rate_limit_delay
+                            time.sleep(wait_time)
+                        else:
+                            logger.error(f"❌ All retry attempts failed for Semantic Scholar API")
+                            return papers
                 
-                # Check if response is valid
                 if not response or not response.content:
-                    logger.warning("⚠️ Empty response from Semantic Scholar API")
+                    logger.warning("⚠️ Empty response from Semantic Scholar API after all retries")
                     break
                     
                 if response.status_code == 200:
@@ -204,8 +313,8 @@ class UBR5APIScraper:
                         if valid_papers and isinstance(valid_papers, list):
                             offset += len(valid_papers)
                         
-                        # Rate limiting
-                        time.sleep(self.rate_limit_delay)
+                        # Rate limiting - use Semantic Scholar specific delay
+                        time.sleep(self.semantic_scholar_rate_limit)
                     except (KeyError, TypeError) as e:
                         logger.error(f"❌ Error parsing Semantic Scholar API response: {e}")
                         break
@@ -214,8 +323,15 @@ class UBR5APIScraper:
                     logger.warning("⚠️ Rate limit hit, waiting 60 seconds...")
                     time.sleep(60)
                     continue
+                elif response.status_code == 403:
+                    logger.error("❌ Semantic Scholar API access forbidden - check API key or quota")
+                    break
+                elif response.status_code == 500:
+                    logger.warning("⚠️ Semantic Scholar API server error, retrying...")
+                    time.sleep(5)
+                    continue
                 else:
-                    logger.error(f"❌ Semantic Scholar API error: {response.status_code}")
+                    logger.error(f"❌ Semantic Scholar API error: {response.status_code} - {response.text[:200]}")
                     break
                     
             except Exception as e:
@@ -362,175 +478,6 @@ class UBR5APIScraper:
             logger.error(f"❌ Error processing Semantic Scholar paper: {e}")
             return None
     
-    def search_scholarly(self, query: str, limit: int = 100) -> List[Dict]:
-        """
-        Search for papers using Google Scholar (via scholarly library).
-        First tries to use API key if available, then falls back to non-API method.
-        
-        Args:
-            query: Search query string
-            limit: Maximum number of results to return
-            
-        Returns:
-            List of paper dictionaries
-        """
-        logger.info(f"🔍 Searching Google Scholar for: {query}")
-        
-        # Check if we have a Scholar API key
-        scholar_api_key = self.api_keys.get("SCHOLAR_API_KEY") or self.api_keys.get("GOOGLE_SCHOLAR_API_KEY")
-        
-        if scholar_api_key:
-            logger.info("🔑 Using Scholar API key for enhanced search")
-            return self._search_scholarly_with_api(query, limit, scholar_api_key)
-        else:
-            logger.info("🔍 No Scholar API key found, using standard scholarly library")
-            return self._search_scholarly_standard(query, limit)
-    
-    def _search_scholarly_with_api(self, query: str, limit: int, api_key: str) -> List[Dict]:
-        """
-        Search Google Scholar using API key for enhanced results.
-        
-        Args:
-            query: Search query string
-            limit: Maximum number of results to return
-            api_key: Scholar API key
-            
-        Returns:
-            List of paper dictionaries
-        """
-        try:
-            # Try to use the official Google Scholar API if available
-            # Note: This is a placeholder for when Google Scholar API becomes available
-            logger.info("🔑 Scholar API method not yet implemented, falling back to standard method")
-            return self._search_scholarly_standard(query, limit)
-            
-        except Exception as e:
-            logger.error(f"❌ Error with Scholar API method: {e}")
-            logger.info("🔄 Falling back to standard scholarly method")
-            return self._search_scholarly_standard(query, limit)
-    
-    def _search_scholarly_standard(self, query: str, limit: int) -> List[Dict]:
-        """
-        Search Google Scholar using the standard scholarly library (non-API method).
-        
-        Args:
-            query: Search query string
-            limit: Maximum number of results to return
-            
-        Returns:
-            List of paper dictionaries
-        """
-        try:
-            # Import scholarly here to avoid import issues
-            from scholarly import scholarly
-            
-            papers = []
-            search_query = scholarly.search_pubs(query)
-            
-            for i, pub in enumerate(search_query):
-                if i >= limit:
-                    break
-                
-                try:
-                    processed_paper = self._process_scholarly_paper(pub)
-                    if processed_paper:
-                        papers.append(processed_paper)
-                    
-                    # Rate limiting
-                    time.sleep(self.rate_limit_delay)
-                    
-                except Exception as e:
-                    logger.error(f"❌ Error processing scholarly paper {i}: {e}")
-                    continue
-            
-            logger.info(f"✅ Found {len(papers)} papers from Google Scholar (standard method)")
-            return papers
-            
-        except ImportError:
-            logger.warning("⚠️ scholarly library not available, skipping Google Scholar search")
-            return []
-        except Exception as e:
-            logger.error(f"❌ Error searching Google Scholar: {e}")
-            return []
-    
-    def _process_scholarly_paper(self, pub) -> Optional[Dict]:
-        """
-        Process a paper from Google Scholar into standard format.
-        
-        Args:
-            pub: Raw paper data from scholarly
-            
-        Returns:
-            Processed paper dictionary or None if invalid
-        """
-        try:
-            # Validate input
-            if not pub or not isinstance(pub, dict):
-                logger.warning("⚠️ Invalid paper data received from Google Scholar")
-                return None
-                
-            # Extract basic information
-            title = pub.get("title", "")
-            if not title or len(title) < 10:
-                return None
-            
-            # Extract authors
-            authors = []
-            if "author" in pub:
-                for author in pub["author"]:
-                    if "name" in author:
-                        authors.append(author["name"])
-            
-            # Extract journal/venue
-            venue = pub.get("venue", "")
-            
-            # Extract year
-            year = pub.get("year")
-            
-            # Extract abstract
-            abstract = pub.get("abstract", "")
-            
-            # Extract citation count
-            citation_count = pub.get("num_citations", 0)
-            
-            # Extract URL
-            url = pub.get("url", "")
-            
-            # Extract publication type
-            pub_type = pub.get("pub_type", "")
-            
-            # Check if it's a preprint
-            is_preprint = "preprint" in pub_type.lower() or "working" in pub_type.lower()
-            
-            # Extract impact factor
-            impact_factor = self._get_impact_factor(venue)
-            
-            # Create processed paper
-            processed_paper = {
-                "title": title,
-                "doi": None,  # Google Scholar doesn't provide DOI
-                "authors": authors,
-                "journal": venue,
-                "year": year,
-                "abstract": abstract,
-                "citation_count": str(citation_count) if citation_count else "0",
-                "reference_count": "0",  # Google Scholar doesn't provide this
-                "impact_factor": impact_factor,
-                "fields_of_study": [],
-                "publication_types": [pub_type] if pub_type else [],
-                "is_preprint": is_preprint,
-                "source": "google_scholar",
-                "paper_id": pub.get("scholar_id"),
-                "open_access_pdf": url if url else None,
-                "publication_date": None,
-                "raw_data": pub  # Keep original data for reference
-            }
-            
-            return processed_paper
-            
-        except Exception as e:
-            logger.error(f"❌ Error processing scholarly paper: {e}")
-            return None
     
     def _get_impact_factor(self, journal_name: str) -> str:
         """
@@ -735,13 +682,24 @@ class UBR5APIScraper:
         all_papers = []
         seen_titles = set()
         
-        # Use specific UBR5 keywords
-        search_keywords = [
-            "ubr5",
-            "UBR5", 
-            "ubr-5",
-            "UBR-5"
-        ]
+        # Use custom keywords if set, otherwise try to load from config file
+        if hasattr(self, 'search_keywords') and self.search_keywords:
+            search_keywords = self.search_keywords
+            logger.info(f"📋 Using custom search keywords: {', '.join(search_keywords)}")
+        else:
+            # Try to load from configuration file
+            search_keywords = self._load_keywords_from_config()
+            if search_keywords:
+                logger.info(f"📋 Using keywords from config: {', '.join(search_keywords)}")
+            else:
+                # Fall back to default UBR5 keywords
+                search_keywords = [
+                    "ubr5",
+                    "UBR5", 
+                    "ubr-5",
+                    "UBR-5"
+                ]
+                logger.info(f"📋 Using default UBR5 keywords: {', '.join(search_keywords)}")
         
         # Validate search keywords
         if not search_keywords or not isinstance(search_keywords, list) or len(search_keywords) == 0:
@@ -759,13 +717,40 @@ class UBR5APIScraper:
                     keyword_pbar.set_description(f"Searching: {keyword}")
                     logger.info(f"🔍 Searching with keyword: {keyword}")
                     
-                    # Search Semantic Scholar - fetch maximum available papers
+                    # Search Semantic Scholar - fetch maximum available papers with timeout
                     try:
-                        semantic_papers = self.search_semantic_scholar(keyword, limit=1000)  # Increased limit
+                        logger.info(f"🔍 Searching Semantic Scholar for keyword: {keyword}")
+                        # Add timeout to prevent hanging
+                        import threading
+                        result = [None]
+                        exception = [None]
+                        
+                        def search_with_timeout():
+                            try:
+                                result[0] = self.search_semantic_scholar(keyword, limit=1000)
+                            except Exception as e:
+                                exception[0] = e
+                        
+                        search_thread = threading.Thread(target=search_with_timeout)
+                        search_thread.daemon = True
+                        search_thread.start()
+                        search_thread.join(timeout=120)  # 2 minute timeout
+                        
+                        if search_thread.is_alive():
+                            logger.warning(f"⚠️ Search for '{keyword}' timed out after 2 minutes, skipping")
+                            continue
+                        
+                        if exception[0]:
+                            raise exception[0]
+                        
+                        semantic_papers = result[0]
                         if semantic_papers and isinstance(semantic_papers, list) and len(semantic_papers) > 0:
+                            logger.info(f"📊 Found {len(semantic_papers)} papers for keyword '{keyword}'")
+                            added_count = 0
                             for paper in semantic_papers:
                                 if paper and isinstance(paper, dict) and self._is_unique_paper(paper, seen_titles):
                                     all_papers.append(paper)
+                                    added_count += 1
                                     # Safe title access
                                     title = paper.get("title", "")
                                     if title:
@@ -773,32 +758,12 @@ class UBR5APIScraper:
                                     # Check limit only if one was set
                                     if max_papers is not None and len(all_papers) >= max_papers:
                                         break
+                            logger.info(f"✅ Added {added_count} new unique papers from keyword '{keyword}' (total: {len(all_papers)})")
                         else:
                             logger.warning(f"⚠️ No valid papers returned from Semantic Scholar for keyword: {keyword}")
                     except Exception as e:
                         logger.error(f"❌ Error searching Semantic Scholar for keyword '{keyword}': {e}")
                         continue
-                    
-                    # Search Google Scholar - fetch maximum available papers
-                    if max_papers is None or len(all_papers) < max_papers:
-                        try:
-                            scholarly_papers = self.search_scholarly(keyword, limit=1000)  # Increased limit
-                            if scholarly_papers and isinstance(scholarly_papers, list) and len(scholarly_papers) > 0:
-                                for paper in scholarly_papers:
-                                    if paper and isinstance(paper, dict) and self._is_unique_paper(paper, seen_titles):
-                                        all_papers.append(paper)
-                                        # Safe title access
-                                        title = paper.get("title", "")
-                                        if title:
-                                            seen_titles.add(title.lower())
-                                        # Check limit only if one was set
-                                        if max_papers is None or len(all_papers) >= max_papers:
-                                            break
-                            else:
-                                logger.warning(f"⚠️ No valid papers returned from Google Scholar for keyword: {keyword}")
-                        except Exception as e:
-                            logger.error(f"❌ Error searching Google Scholar for keyword '{keyword}': {e}")
-                            continue
                     
                     # Update progress
                     keyword_pbar.update(1)
@@ -816,6 +781,10 @@ class UBR5APIScraper:
             return []
             
         logger.info(f"✅ Collected {len(all_papers)} unique UBR5-related papers")
+        logger.info(f"📊 Search Summary:")
+        logger.info(f"   - Keywords searched: {len(search_keywords)}")
+        logger.info(f"   - Total unique papers: {len(all_papers)}")
+        logger.info(f"   - Source: Semantic Scholar only")
         # Ensure we return a valid list
         return all_papers
     
@@ -978,14 +947,16 @@ class UBR5APIScraper:
             Embedding vector or None if failed
         """
         try:
-            url = "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedText"
+            url = "https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent"
             
             headers = {
                 "Content-Type": "application/json"
             }
             
             data = {
-                "text": text
+                "content": {
+                    "parts": [{"text": text}]
+                }
             }
             
             params = {
@@ -1201,6 +1172,9 @@ def main():
     # Check API key availability
     availability = scraper.check_api_key_availability()
     
+    # Test API connectivity
+    connectivity = scraper.test_api_connectivity()
+    
     # Show warnings if critical keys are missing
     if not availability["google_api"]:
         print("\n⚠️  WARNING: GOOGLE_API_KEY not found!")
@@ -1209,7 +1183,6 @@ def main():
         print("   Example keys.json structure:")
         print("   {")
         print('     "GOOGLE_API_KEY": "your_google_api_key_here"')
-        print('     "SCHOLAR_API_KEY": "optional_scholar_api_key"')
         print("   }")
         print()
     
@@ -1247,7 +1220,7 @@ def main():
     
     if max_papers is None:
         print("\n🚀 Starting unlimited UBR5 paper collection...")
-        print("   This will fetch ALL available papers from Semantic Scholar and Google Scholar")
+        print("   This will fetch ALL available papers from Semantic Scholar")
     else:
         print(f"\n🚀 Starting UBR5 paper collection (target: {max_papers} papers)...")
     

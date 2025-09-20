@@ -3,10 +3,17 @@ import numpy as np
 import requests
 from sklearn.metrics.pairwise import cosine_similarity
 import os
+import sys
 from tqdm.auto import tqdm
-from chromadb_manager import ChromaDBManager
+import tkinter as tk
+from tkinter import messagebox
+
+# Add the current directory to Python path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from src.core.chromadb_manager import ChromaDBManager
 import logging
-from hypothesis_tools import HypothesisGenerator, HypothesisCritic, MetaHypothesisGenerator, get_lab_goals, get_lab_config
+from src.ai.hypothesis_tools import HypothesisGenerator, HypothesisCritic, MetaHypothesisGenerator, get_lab_goals, get_lab_config, is_ubr5_related
 import time
 import random
 import threading
@@ -21,80 +28,248 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class HypothesisTimer:
-    """Timer for hypothesis critique process with 5-minute limit."""
+    """Optimized timer for hypothesis critique process with reduced timeout."""
 
-    def __init__(self, timeout_minutes=5):
+    def __init__(self, timeout_minutes=1):  # Reduced from 5 to 1 minute
         self.timeout_seconds = timeout_minutes * 60
         self.start_time = None
         self.is_expired = False
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()  # Use RLock for better thread safety
 
     def start(self):
         """Start the timer."""
-        with self.lock:
-            self.start_time = time.time()
-            self.is_expired = False
+        try:
+            with self.lock:
+                self.start_time = time.time()
+                self.is_expired = False
+        except Exception as e:
+            logger.warning(f"⚠️ Timer start error: {e}")
 
     def check_expired(self):
         """Check if the timer has expired."""
         if self.start_time is None:
             return False
-        with self.lock:
-            if not self.is_expired:
-                elapsed = time.time() - self.start_time
-                if elapsed >= self.timeout_seconds:
-                    self.is_expired = True
-            return self.is_expired
+        try:
+            with self.lock:
+                if not self.is_expired:
+                    elapsed = time.time() - self.start_time
+                    if elapsed >= self.timeout_seconds:
+                        self.is_expired = True
+                return self.is_expired
+        except Exception as e:
+            logger.warning(f"⚠️ Timer check error: {e}")
+            return True  # Assume expired on error
 
     def get_remaining_time(self):
         """Get remaining time in seconds."""
         if self.start_time is None:
             return self.timeout_seconds
-        elapsed = time.time() - self.start_time
-        return max(0, self.timeout_seconds - elapsed)
+        try:
+            elapsed = time.time() - self.start_time
+            return max(0, self.timeout_seconds - elapsed)
+        except Exception as e:
+            logger.warning(f"⚠️ Timer remaining time error: {e}")
+            return 0
 
     def reset(self):
         """Reset the timer."""
-        with self.lock:
-            self.start_time = None
-            self.is_expired = False
+        try:
+            with self.lock:
+                self.start_time = None
+                self.is_expired = False
+        except Exception as e:
+            logger.warning(f"⚠️ Timer reset error: {e}")
 
-class GeminiRateLimiter:
-    """Rate limiter for Gemini API calls (1000 requests per minute)."""
+class TokenAwareRateLimiter:
+    """Token-aware rate limiter for Gemini API calls with quota protection."""
 
-    def __init__(self, max_requests_per_minute=1000):
+    def __init__(self, max_requests_per_minute=1000, max_tokens_per_minute=1000000):
         self.max_requests = max_requests_per_minute
+        self.max_tokens = max_tokens_per_minute
         self.request_times = deque()
-        self.lock = threading.Lock() if 'threading' in globals() else None
+        self.token_usage = deque()  # (tokens, timestamp) pairs
+        self.lock = threading.RLock() if 'threading' in globals() else None
+        self.max_wait_time = 10  # Maximum wait time in seconds
 
-    def wait_if_needed(self):
-        """Wait if we're at the rate limit."""
-        current_time = time.time()
+    def estimate_tokens(self, text):
+        """Improved token estimation: ~3.2 characters per token for scientific text."""
+        if not text:
+            return 1
+        # Use full text, not truncated sample
+        char_count = len(text)
+        # More accurate for scientific text
+        base_tokens = char_count / 3.2
+        # Add overhead for formatting
+        overhead_factor = 1.15
+        return int(base_tokens * overhead_factor)
 
-        # Remove old requests (older than 1 minute)
-        while self.request_times and current_time - self.request_times[0] > 60:
-            self.request_times.popleft()
+    def wait_if_needed(self, estimated_tokens=0):
+        """Wait if we're at the rate limit with intelligent pacing to prevent TPM spikes."""
+        try:
+            current_time = time.time()
 
-        # If we're at the limit, wait
-        if len(self.request_times) >= self.max_requests:
-            wait_time = 60 - (current_time - self.request_times[0]) + 1
-            if wait_time > 0:
-                print(f"⏳ Rate limit reached. Waiting {wait_time:.1f}s for Gemini API...")
+            # Remove old requests (older than 1 minute)
+            while self.request_times and current_time - self.request_times[0] > 60:
+                self.request_times.popleft()
+            
+            # Remove old token usage (older than 1 minute)
+            while self.token_usage and current_time - self.token_usage[0][1] > 60:
+                self.token_usage.popleft()
+
+            # Check token quota with intelligent pacing
+            current_tokens = sum(tokens for tokens, _ in self.token_usage)
+            token_usage_percentage = current_tokens / self.max_tokens
+            
+            # Implement progressive pacing based on token usage
+            if token_usage_percentage > 0.9:  # 90%+ usage - aggressive pacing
+                wait_time = 5.0 + random.uniform(1.0, 3.0)  # 5-8 seconds
+                logger.warning(f"🚨 High token usage ({token_usage_percentage:.1%}). Aggressive pacing: {wait_time:.1f}s")
+            elif token_usage_percentage > 0.8:  # 80%+ usage - moderate pacing
+                wait_time = 2.0 + random.uniform(0.5, 1.5)  # 2-3.5 seconds
+                logger.info(f"⚠️ Moderate token usage ({token_usage_percentage:.1%}). Moderate pacing: {wait_time:.1f}s")
+            elif token_usage_percentage > 0.7:  # 70%+ usage - light pacing
+                wait_time = 1.0 + random.uniform(0.2, 0.8)  # 1-1.8 seconds
+                logger.info(f"📊 Token usage at {token_usage_percentage:.1%}. Light pacing: {wait_time:.1f}s")
+            elif current_tokens + estimated_tokens > self.max_tokens:  # Would exceed limit
+                # Calculate wait time based on token usage - be more precise
+                if self.token_usage:
+                    oldest_token_time = self.token_usage[0][1]
+                    time_elapsed = current_time - oldest_token_time
+                    wait_time = min(60 - time_elapsed + 1, self.max_wait_time)
+                else:
+                    wait_time = 1
+                
+                if wait_time > 0:
+                    logger.info(f"⏳ Token quota limit reached ({current_tokens:,}/{self.max_tokens:,} tokens). Waiting {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    current_time = time.time()
+                    # Clean up old data after waiting
+                    while self.token_usage and current_time - self.token_usage[0][1] > 60:
+                        self.token_usage.popleft()
+                    return  # Skip the pacing logic below
+
+            # Check request rate limit
+            elif len(self.request_times) >= self.max_requests:
+                if self.request_times:
+                    oldest_request_time = self.request_times[0]
+                    time_elapsed = current_time - oldest_request_time
+                    wait_time = min(60 - time_elapsed + 1, self.max_wait_time)
+                else:
+                    wait_time = 1
+                    
+                if wait_time > 0:
+                    logger.info(f"⏳ Request rate limit reached ({len(self.request_times)}/{self.max_requests}). Waiting {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    current_time = time.time()
+                    # Clean up old data after waiting
+                    while self.request_times and current_time - self.request_times[0] > 60:
+                        self.request_times.popleft()
+
+            # Apply intelligent pacing if we're approaching limits
+            if token_usage_percentage > 0.7:
                 time.sleep(wait_time)
                 current_time = time.time()
+                # Clean up old data after pacing
+                while self.token_usage and current_time - self.token_usage[0][1] > 60:
+                    self.token_usage.popleft()
 
-        # Add current request
-        self.request_times.append(current_time)
+            # Add current request
+            self.request_times.append(current_time)
+            if estimated_tokens > 0:
+                self.token_usage.append((estimated_tokens, current_time))
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Rate limiter error: {e}")
+            # If rate limiter fails, add a conservative delay to prevent quota issues
+            time.sleep(2.0)
 
     def get_remaining_requests(self):
         """Get number of remaining requests in current window."""
-        current_time = time.time()
+        try:
+            current_time = time.time()
+            while self.request_times and current_time - self.request_times[0] > 60:
+                self.request_times.popleft()
+            return max(0, self.max_requests - len(self.request_times))
+        except Exception as e:
+            logger.warning(f"⚠️ Rate limiter count error: {e}")
+            return self.max_requests
 
-        # Remove old requests
-        while self.request_times and current_time - self.request_times[0] > 60:
-            self.request_times.popleft()
+    def get_remaining_tokens(self):
+        """Get number of remaining tokens in current window."""
+        try:
+            current_time = time.time()
+            while self.token_usage and current_time - self.token_usage[0][1] > 60:
+                self.token_usage.popleft()
+            current_tokens = sum(tokens for tokens, _ in self.token_usage)
+            return max(0, self.max_tokens - current_tokens)
+        except Exception as e:
+            logger.warning(f"⚠️ Token limiter count error: {e}")
+            return self.max_tokens
 
-        return max(0, self.max_requests - len(self.request_times))
+    def execute_with_retry(self, api_call_func, *args, max_retries=5, **kwargs):
+        """
+        Execute API call with exponential backoff retry logic for quota exceeded errors.
+        
+        Args:
+            api_call_func: Function that makes the API call
+            *args: Arguments to pass to the API call function
+            max_retries: Maximum number of retry attempts
+            **kwargs: Keyword arguments to pass to the API call function
+            
+        Returns:
+            Result of the API call function
+            
+        Raises:
+            Exception: If all retries are exhausted
+        """
+        last_exception = None
+        
+        for attempt in range(max_retries + 1):
+            try:
+                # Wait if needed before making the call
+                self.wait_if_needed()
+                
+                # Make the API call
+                result = api_call_func(*args, **kwargs)
+                
+                # If successful, return the result
+                return result
+                
+            except Exception as e:
+                last_exception = e
+                error_str = str(e).lower()
+                
+                # Check if this is a quota exceeded error
+                if any(keyword in error_str for keyword in ['quota', '429', 'rate limit', 'exceeded']):
+                    if attempt < max_retries:
+                        # Calculate exponential backoff delay with jitter
+                        base_delay = min(2 ** attempt, 60)  # Cap at 60 seconds
+                        jitter = random.uniform(0.1, 0.5)  # Add random jitter
+                        delay = base_delay + jitter
+                        
+                        logger.warning(f"⚠️ Quota exceeded (attempt {attempt + 1}/{max_retries + 1}). Retrying in {delay:.1f}s...")
+                        
+                        # Wait with exponential backoff
+                        time.sleep(delay)
+                        
+                        # Clean up old data to free up quota
+                        current_time = time.time()
+                        while self.request_times and current_time - self.request_times[0] > 60:
+                            self.request_times.popleft()
+                        while self.token_usage and current_time - self.token_usage[0][1] > 60:
+                            self.token_usage.popleft()
+                        
+                        continue
+                    else:
+                        logger.error(f"❌ Quota exceeded after {max_retries} retries. Giving up.")
+                        break
+                else:
+                    # Not a quota error, re-raise immediately
+                    logger.error(f"❌ Non-quota error: {e}")
+                    raise e
+        
+        # If we get here, all retries were exhausted
+        raise last_exception
 
 class EnhancedRAGQuery:
     """
@@ -122,10 +297,12 @@ class EnhancedRAGQuery:
 
         # Track the initial "add" quantity for dynamic chunk selection
         self.initial_add_quantity = None
-        self.hypothesis_timer = HypothesisTimer(timeout_minutes=5)  # 5-minute timer
+        self.hypothesis_timer = HypothesisTimer(timeout_minutes=1)  # Reduced to 1-minute timer
 
-        # Track used papers to avoid reusing them in dynamic chunk selection
+        # Track used papers with deprioritization system
         self.used_papers = set()  # Set of paper identifiers (DOI or title) that have been used
+        self.paper_usage_count = {}  # Track how many times each paper has been used
+        self.deprioritization_factor = 0.3  # Reduce score by 30% for each previous use
 
         # Package system for collecting search results
         self.current_package = {
@@ -135,14 +312,22 @@ class EnhancedRAGQuery:
             "total_chars": 0
         }
 
-        # Initialize Gemini rate limiter (1000 requests per minute)
-        self.gemini_rate_limiter = GeminiRateLimiter(max_requests_per_minute=1000)
+        # Initialize token-aware rate limiter with quota protection
+        # Optimized limits for Gemini API - using actual API quotas for maximum performance
+        self.gemini_rate_limiter = TokenAwareRateLimiter(max_requests_per_minute=900, max_tokens_per_minute=900000)
+        
+        # Performance monitoring
+        self.query_count = 0
+        self.total_query_time = 0
+        self.cache = {}  # Simple in-memory cache
+        self.cache_max_size = 1000  # Limit cache size
+        self.performance_log = []
 
-        print("🚀 Initializing Enhanced RAG System...")
+        print("🚀 Initializing Enhanced RAG System with Performance Optimizations...")
 
         # Load API keys first
         try:
-            with open("keys.json") as f:
+            with open("config/keys.json") as f:
                 keys = json.load(f)
                 self.api_key = keys["GOOGLE_API_KEY"]  # For embeddings
                 self.gemini_api_key = keys["GEMINI_API_KEY"]  # For text generation
@@ -154,8 +339,9 @@ class EnhancedRAGQuery:
 
         # Initialize Gemini client
         try:
-            from google import genai
-            self.gemini_client = genai.Client(api_key=self.gemini_api_key)
+            import google.generativeai as genai
+            genai.configure(api_key=self.gemini_api_key)
+            self.gemini_client = genai
             print("✅ Gemini client initialized successfully")
         except Exception as e:
             logger.error(f"❌ Failed to initialize Gemini client: {e}")
@@ -431,6 +617,77 @@ class EnhancedRAGQuery:
 
         return results
 
+    def search_chromadb_with_deprioritization(self, query, top_k=5, filter_dict=None, show_progress=True):
+        """Search using ChromaDB with deprioritization of previously used papers."""
+        if not self.use_chromadb or not self.chroma_manager:
+            print("❌ ChromaDB not available. Please initialize with ChromaDB enabled.")
+            return []
+
+        # Check if ChromaDB has data
+        if not self.is_chromadb_ready():
+            print("❌ ChromaDB is empty. Please load data first using the master processor (option 4).")
+            return []
+
+        # Get query embedding
+        query_embedding = self.get_google_embedding(query)
+        if not query_embedding:
+            return []
+
+        # Search with larger result set to account for deprioritization
+        search_k = min(top_k * 3, 1000)  # Search 3x more to account for deprioritization
+        
+        # Search in ChromaDB
+        results = self.chroma_manager.search_similar(
+            query_embedding=query_embedding,
+            n_results=search_k,
+            where_filter=filter_dict
+        )
+
+        if not results:
+            return []
+
+        # Apply deprioritization and re-rank
+        deprioritized_results = []
+        for i, result in enumerate(results):
+            metadata = result.get('metadata', {})
+            paper_id = self._get_paper_identifier(metadata)
+            
+            # Calculate deprioritization factor
+            usage_count = self.paper_usage_count.get(paper_id, 0)
+            deprioritization_multiplier = (1 - self.deprioritization_factor) ** usage_count
+            
+            # Apply deprioritization to similarity score
+            original_similarity = result.get('similarity', 1.0)
+            adjusted_similarity = original_similarity * deprioritization_multiplier
+            
+            # Create new result with deprioritization info
+            deprioritized_result = result.copy()
+            deprioritized_result.update({
+                'adjusted_similarity': adjusted_similarity,
+                'usage_count': usage_count,
+                'deprioritization_multiplier': deprioritization_multiplier,
+                'paper_id': paper_id,
+                'original_rank': i + 1
+            })
+            
+            deprioritized_results.append(deprioritized_result)
+
+        # Sort by adjusted similarity (descending)
+        deprioritized_results.sort(key=lambda x: x['adjusted_similarity'], reverse=True)
+        
+        # Take top_k results
+        final_results = deprioritized_results[:top_k]
+        
+        # Update ranks
+        for i, result in enumerate(final_results):
+            result['rank'] = i + 1
+
+        if show_progress and self.paper_usage_count:
+            used_papers_in_results = sum(1 for r in final_results if r['usage_count'] > 0)
+            print(f"📊 Deprioritization: {used_papers_in_results}/{len(final_results)} papers previously used")
+
+        return final_results
+
     def search_hybrid(self, query, top_k=20, filter_dict=None):
         """Search using ChromaDB only (simplified from hybrid)."""
         if not self.use_chromadb or not self.chroma_manager:
@@ -534,15 +791,34 @@ class EnhancedRAGQuery:
         for chunk in context_chunks:
             if isinstance(chunk, dict):
                 metadata = chunk.get('metadata', {})
-                # Extract source information
-                source_name = metadata.get('source_name', 'Unknown')
+                
+                # Extract source information with better fallbacks
+                source_name = metadata.get('source_name', metadata.get('source', 'Unknown'))
                 title = metadata.get('title', 'No title')
                 doi = metadata.get('doi', 'No DOI')
-                authors = metadata.get('author', metadata.get('authors', 'Unknown authors'))
-                journal = metadata.get('journal', 'Unknown journal')
-                # Extract year from publication_date
-                publication_date = metadata.get('publication_date', '')
-                year = publication_date[:4] if publication_date and len(publication_date) >= 4 else 'Unknown year'
+                
+                # Try multiple field names for authors
+                authors = (metadata.get('author') or 
+                         metadata.get('authors') or 
+                         metadata.get('author_list') or 
+                         'Unknown authors')
+                
+                # Try multiple field names for journal
+                journal = (metadata.get('journal') or 
+                          metadata.get('journal_name') or 
+                          metadata.get('publication_venue') or 
+                          'Unknown journal')
+                
+                # Extract year from publication_date or other date fields
+                publication_date = (metadata.get('publication_date') or 
+                                   metadata.get('date') or 
+                                   metadata.get('year') or 
+                                   '')
+                
+                if publication_date and len(str(publication_date)) >= 4:
+                    year = str(publication_date)[:4]
+                else:
+                    year = 'Unknown year'
 
                 # Create citation entry
                 citation = {
@@ -588,11 +864,41 @@ class EnhancedRAGQuery:
 
         return "; ".join(formatted_citations)
 
-    def retrieve_relevant_chunks(self, query, top_k=1500, lab_paper_ratio=None):
+    def retrieve_relevant_chunks(self, query, top_k=1500, lab_paper_ratio=None, use_filtering=True):
         """Retrieve the most relevant chunks from all loaded batches using ChromaDB, with lab-authored papers included."""
         if lab_paper_ratio is None:
             lab_paper_ratio = getattr(self, 'lab_paper_ratio', 0.2)
-        return self.retrieve_relevant_chunks_with_lab_papers(query, top_k, lab_paper_ratio)
+        
+        # Use filtering by default for better quality
+        if use_filtering:
+            return self.retrieve_relevant_chunks_with_filtering(query, top_k, lab_paper_ratio)
+        else:
+            return self.retrieve_relevant_chunks_with_lab_papers(query, top_k, lab_paper_ratio)
+
+    def retrieve_relevant_chunks_with_deprioritization(self, query, top_k=1500, lab_paper_ratio=None, preferred_authors=None, use_filtering=True):
+        """
+        Retrieve relevant chunks with deprioritization of previously used papers.
+        This ensures maximum citation diversity across hypotheses.
+        """
+        if lab_paper_ratio is None:
+            lab_paper_ratio = getattr(self, 'lab_paper_ratio', 0.2)
+        
+        print(f"🎯 Retrieving chunks with deprioritization for maximum citation diversity...")
+        print(f"📊 Deprioritization factor: {self.deprioritization_factor * 100}% reduction per use")
+        
+        # Use deprioritization method
+        chunks = self.retrieve_relevant_chunks_with_lab_papers_deprioritized(
+            query, top_k, lab_paper_ratio, preferred_authors
+        )
+        
+        # Apply filtering if requested
+        if use_filtering and chunks:
+            print(f"🔍 Applying quality filtering to deprioritized chunks...")
+            query_keywords = query.lower().split()
+            filtered_chunks = self._filter_context_chunks(chunks, query_keywords)
+            return filtered_chunks
+            
+        return chunks
 
     def select_dynamic_chunks_for_generation(self, query, num_chunks=None, lab_paper_ratio=None, randomization_strategy='enhanced'):
         """
@@ -635,13 +941,14 @@ class EnhancedRAGQuery:
             else:
                 print(f"🔬 Including {int(num_chunks * lab_paper_ratio)} lab-authored papers")
 
-            # Use the sophisticated lab paper search method
+            # Use the sophisticated lab paper search method with filtering
             preferred_authors = getattr(self, 'preferred_authors', [])
-            results = self.retrieve_relevant_chunks_with_lab_papers(
+            results = self.retrieve_relevant_chunks_with_filtering(
                 search_query,
                 top_k=min(num_chunks * 3, 5000),  # Search up to 3x the needed amount, max 5000
                 lab_paper_ratio=lab_paper_ratio,
-                preferred_authors=preferred_authors
+                preferred_authors=preferred_authors,
+                query_keywords=search_query.lower().split()
             )
 
             if not results:
@@ -1091,6 +1398,395 @@ class EnhancedRAGQuery:
             print(f"❌ Error selecting diverse papers: {e}")
             return None
 
+    def _filter_context_chunks(self, context_chunks, query_keywords=None):
+        """
+        Filter and clean context chunks to improve quality for hypothesis generation.
+        Removes low-quality chunks and ensures diverse, relevant content.
+        """
+        filtered_chunks = []
+        
+        for chunk in context_chunks:
+            if isinstance(chunk, dict):
+                text = chunk.get("document", "")
+                metadata = chunk.get("metadata", {})
+            else:
+                text = str(chunk)
+                metadata = {}
+            
+            # Skip empty or very short chunks
+            if not text or len(text.strip()) < 50:
+                continue
+                
+            # Skip chunks that are mostly metadata or formatting
+            if text.count('\n') > len(text) / 20:  # Too many line breaks
+                continue
+                
+            # Skip chunks that are mostly numbers or special characters
+            alpha_ratio = sum(c.isalpha() for c in text) / len(text) if text else 0
+            if alpha_ratio < 0.6:  # Less than 60% alphabetic characters
+                continue
+                
+            # Prioritize chunks with query-relevant content if keywords provided
+            if query_keywords:
+                text_lower = text.lower()
+                relevance_score = sum(1 for keyword in query_keywords if keyword.lower() in text_lower)
+                if relevance_score > 0:
+                    filtered_chunks.insert(0, text)  # Add to beginning for priority
+                else:
+                    filtered_chunks.append(text)
+            else:
+                # General quality filtering without specific keyword prioritization
+                filtered_chunks.append(text)
+        
+        # Limit to reasonable number of chunks to avoid token limits
+        max_chunks = 1000  # Reduced from 1500 to improve quality
+        if len(filtered_chunks) > max_chunks:
+            # Keep the first max_chunks (prioritizing relevant content)
+            filtered_chunks = filtered_chunks[:max_chunks]
+            
+        print(f"📊 Filtered context: {len(filtered_chunks)} high-quality chunks (from {len(context_chunks)} original)")
+        return filtered_chunks
+
+    def _is_chunk_high_quality(self, chunk_text, query_keywords=None):
+        """
+        Check if a chunk meets quality standards for hypothesis generation.
+        Returns True if chunk is high quality, False otherwise.
+        """
+        if not chunk_text or len(chunk_text.strip()) < 50:
+            return False
+            
+        # Skip chunks that are mostly metadata or formatting
+        if chunk_text.count('\n') > len(chunk_text) / 20:  # Too many line breaks
+            return False
+            
+        # Skip chunks that are mostly numbers or special characters
+        alpha_ratio = sum(c.isalpha() for c in chunk_text) / len(chunk_text) if chunk_text else 0
+        if alpha_ratio < 0.6:  # Less than 60% alphabetic characters
+            return False
+            
+        # Check for query relevance if keywords provided
+        if query_keywords:
+            text_lower = chunk_text.lower()
+            relevance_score = sum(1 for keyword in query_keywords if keyword.lower() in text_lower)
+            return relevance_score > 0
+            
+        return True
+
+    def _get_replacement_chunks(self, query, num_needed, excluded_chunks=None, query_keywords=None, lab_paper_ratio=None, preferred_authors=None):
+        """
+        Get replacement chunks from ChromaDB using sophisticated search algorithm.
+        Applies lab paper prioritization, citation analysis, and temporal balance.
+        """
+        if not self.use_chromadb or not self.chroma_manager:
+            return []
+            
+        if excluded_chunks is None:
+            excluded_chunks = set()
+            
+        try:
+            print(f"🔍 Searching for {num_needed} replacement chunks with sophisticated algorithm...")
+            
+            # Use sophisticated search to get high-quality replacement chunks
+            # Search for more chunks to allow for filtering and exclusion
+            search_results = self.sophisticated_lab_paper_search(
+                query, 
+                top_k=num_needed * 4,  # Get 4x more to account for filtering and exclusions
+                lab_paper_ratio=lab_paper_ratio,
+                preferred_authors=preferred_authors
+            )
+            
+            if not search_results:
+                print("❌ No replacement chunks found")
+                return []
+                
+            print(f"📚 Found {len(search_results)} potential replacement chunks")
+            
+            # Process results and apply sophisticated filtering
+            replacement_chunks = []
+            lab_papers = []
+            preferred_author_papers = []
+            other_papers = []
+            
+            # Track citation statistics for analysis
+            all_citations = []
+            journal_impact_factors = {}
+            
+            for chunk in search_results:
+                if isinstance(chunk, dict):
+                    chunk_text = chunk.get("document", "")
+                    metadata = chunk.get("metadata", {})
+                else:
+                    chunk_text = str(chunk)
+                    metadata = {}
+                
+                # Create robust exclusion ID using content hash
+                chunk_id = hash(chunk_text.strip())
+                
+                # Skip if already excluded
+                if chunk_id in excluded_chunks:
+                    continue
+                    
+                # Check quality first
+                if not self._is_chunk_high_quality(chunk_text, query_keywords):
+                    continue
+                
+                # Extract citation count for analysis
+                citation_count = metadata.get('citation_count', 'not found')
+                if citation_count != 'not found':
+                    try:
+                        citations = int(citation_count)
+                        all_citations.append(citations)
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Track journal for impact factor analysis
+                journal = metadata.get('journal', 'Unknown journal')
+                if journal not in journal_impact_factors:
+                    journal_impact_factors[journal] = []
+                if citation_count != 'not found':
+                    try:
+                        journal_impact_factors[journal].append(int(citation_count))
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Categorize papers
+                if self.is_lab_authored_paper(metadata):
+                    lab_papers.append((chunk_text, metadata, citation_count))
+                elif preferred_authors and self._is_preferred_author_paper(metadata, preferred_authors):
+                    preferred_author_papers.append((chunk_text, metadata, citation_count))
+                else:
+                    other_papers.append((chunk_text, metadata, citation_count))
+            
+            print(f"📊 Replacement candidates: {len(lab_papers)} lab papers, {len(preferred_author_papers)} preferred author papers, {len(other_papers)} other papers")
+            
+            # Calculate statistics for prioritization
+            avg_citations = np.mean(all_citations) if all_citations else 0
+            median_citations = np.median(all_citations) if all_citations else 0
+            
+            # Calculate journal impact factors
+            journal_impact_scores = {}
+            for journal, citations in journal_impact_factors.items():
+                if citations:
+                    journal_impact_scores[journal] = np.mean(citations)
+            
+            print(f"📈 Replacement citation stats: avg={avg_citations:.1f}, median={median_citations:.1f}")
+            
+            # Score and rank all candidates
+            all_candidates = []
+            
+            # Score lab papers (highest priority)
+            for chunk_text, metadata, citation_count in lab_papers:
+                score = self._calculate_replacement_score(metadata, citation_count, avg_citations, journal_impact_scores, is_lab=True)
+                all_candidates.append((score, chunk_text, metadata, 'lab'))
+            
+            # Score preferred author papers
+            for chunk_text, metadata, citation_count in preferred_author_papers:
+                score = self._calculate_replacement_score(metadata, citation_count, avg_citations, journal_impact_scores, is_preferred=True)
+                all_candidates.append((score, chunk_text, metadata, 'preferred'))
+            
+            # Score other papers
+            for chunk_text, metadata, citation_count in other_papers:
+                score = self._calculate_replacement_score(metadata, citation_count, avg_citations, journal_impact_scores, is_lab=False)
+                all_candidates.append((score, chunk_text, metadata, 'other'))
+            
+            # Sort by score (highest first)
+            all_candidates.sort(key=lambda x: x[0], reverse=True)
+            
+            # Apply temporal balance (50/50 old/new)
+            old_candidates = []
+            new_candidates = []
+            
+            for score, chunk_text, metadata, paper_type in all_candidates:
+                year = metadata.get('year', 'Unknown')
+                try:
+                    year_int = int(year) if year != 'Unknown' else 2020
+                    if year_int <= 2020:  # Same temporal dividing line as main search
+                        old_candidates.append((score, chunk_text, metadata, paper_type))
+                    else:
+                        new_candidates.append((score, chunk_text, metadata, paper_type))
+                except (ValueError, TypeError):
+                    # Default to old if year parsing fails
+                    old_candidates.append((score, chunk_text, metadata, paper_type))
+            
+            # Select balanced replacements
+            old_target = num_needed // 2
+            new_target = num_needed - old_target
+            
+            # Select old papers
+            for score, chunk_text, metadata, paper_type in old_candidates:
+                if len(replacement_chunks) >= num_needed:
+                    break
+                # Return full chunk object with metadata instead of just text
+                chunk_object = {"document": chunk_text, "metadata": metadata}
+                replacement_chunks.append(chunk_object)
+                excluded_chunks.add(hash(chunk_text.strip()))
+                print(f"✅ Added {paper_type} replacement (old, score: {score:.1f})")
+            
+            # Select new papers
+            for score, chunk_text, metadata, paper_type in new_candidates:
+                if len(replacement_chunks) >= num_needed:
+                    break
+                # Return full chunk object with metadata instead of just text
+                chunk_object = {"document": chunk_text, "metadata": metadata}
+                replacement_chunks.append(chunk_object)
+                excluded_chunks.add(hash(chunk_text.strip()))
+                print(f"✅ Added {paper_type} replacement (new, score: {score:.1f})")
+            
+            print(f"📊 Selected {len(replacement_chunks)} replacement chunks")
+            return replacement_chunks
+            
+        except Exception as e:
+            print(f"❌ Error getting replacement chunks: {e}")
+            return []
+
+    def _calculate_replacement_score(self, metadata, citation_count, avg_citations, journal_impact_scores, is_lab=False, is_preferred=False):
+        """
+        Calculate a comprehensive score for replacement chunk prioritization.
+        """
+        score = 0.0
+        
+        # Base score
+        score += 1.0
+        
+        # Lab paper bonus (highest priority)
+        if is_lab:
+            score += 10.0
+        
+        # Preferred author bonus
+        if is_preferred:
+            score += 5.0
+        
+        # Citation analysis
+        if citation_count != 'not found':
+            try:
+                citations = int(citation_count)
+                # Bonus for high citations
+                if citations > avg_citations * 1.5:
+                    score += 3.0
+                elif citations > avg_citations:
+                    score += 1.5
+                # Penalty for very low citations
+                elif citations < avg_citations * 0.3:
+                    score -= 1.0
+            except (ValueError, TypeError):
+                pass
+        
+        # Journal impact factor
+        journal = metadata.get('journal', 'Unknown journal')
+        if journal in journal_impact_scores:
+            journal_score = journal_impact_scores[journal]
+            if journal_score > avg_citations * 1.2:
+                score += 2.0
+            elif journal_score > avg_citations:
+                score += 1.0
+        
+        # Preprint penalty
+        if self._is_preprint(metadata):
+            score -= 2.0
+        
+        # Year bonus (prefer recent papers)
+        year = metadata.get('year', 'Unknown')
+        try:
+            year_int = int(year) if year != 'Unknown' else 2020
+            if year_int >= 2020:
+                score += 1.0
+            elif year_int >= 2015:
+                score += 0.5
+        except (ValueError, TypeError):
+            pass
+        
+        return score
+
+    def _is_preprint(self, metadata):
+        """
+        Check if a paper is a preprint based on metadata.
+        """
+        source = metadata.get('source', '').lower()
+        source_name = metadata.get('source_name', '').lower()
+        journal = metadata.get('journal', '').lower()
+        
+        # Check for preprint indicators
+        preprint_indicators = ['biorxiv', 'medrxiv', 'arxiv', 'preprint', 'pre-print']
+        
+        for indicator in preprint_indicators:
+            if indicator in source or indicator in source_name or indicator in journal:
+                return True
+                
+        return False
+
+    def retrieve_relevant_chunks_with_filtering(self, query, top_k=1500, lab_paper_ratio=None, preferred_authors=None, query_keywords=None):
+        """
+        Retrieve relevant chunks with real-time filtering and replacement.
+        This ensures high-quality context by filtering during retrieval and replacing filtered chunks.
+        """
+        if not self.use_chromadb or not self.chroma_manager:
+            print("❌ ChromaDB not available.")
+            return []
+
+        print(f"🔍 Retrieving chunks with real-time filtering for: {query}")
+        print(f"📊 Target: {top_k} chunks with quality filtering")
+        
+        # Extract keywords from query for relevance scoring
+        if query_keywords is None:
+            query_keywords = query.lower().split()
+            
+        # Get initial results using sophisticated search
+        initial_chunks = self.sophisticated_lab_paper_search(query, top_k * 2, lab_paper_ratio, preferred_authors)
+        
+        if not initial_chunks:
+            print("❌ No initial chunks found")
+            return []
+            
+        print(f"📚 Retrieved {len(initial_chunks)} initial chunks")
+        
+        # Filter chunks and track filtered ones
+        high_quality_chunks = []
+        filtered_count = 0
+        excluded_chunks = set()
+        
+        for chunk in initial_chunks:
+            if isinstance(chunk, dict):
+                chunk_text = chunk.get("document", "")
+            else:
+                chunk_text = str(chunk)
+                
+            # Use robust hash-based exclusion ID
+            chunk_id = hash(chunk_text.strip())
+            
+            if self._is_chunk_high_quality(chunk_text, query_keywords):
+                # Preserve the full chunk object with metadata instead of just text
+                high_quality_chunks.append(chunk)
+            else:
+                filtered_count += 1
+                excluded_chunks.add(chunk_id)
+                
+        print(f"📊 Filtered out {filtered_count} low-quality chunks")
+        
+        # Replace filtered chunks with better alternatives
+        if filtered_count > 0:
+            print(f"🔄 Replacing {filtered_count} filtered chunks with better alternatives...")
+            replacement_chunks = self._get_replacement_chunks(
+                query, 
+                filtered_count, 
+                excluded_chunks, 
+                query_keywords,
+                lab_paper_ratio=lab_paper_ratio,
+                preferred_authors=preferred_authors
+            )
+            
+            if replacement_chunks:
+                high_quality_chunks.extend(replacement_chunks)
+                print(f"✅ Added {len(replacement_chunks)} replacement chunks")
+            else:
+                print(f"⚠️  Could not find replacement chunks")
+                
+        # Limit to target number
+        if len(high_quality_chunks) > top_k:
+            high_quality_chunks = high_quality_chunks[:top_k]
+            
+        print(f"📊 Final result: {len(high_quality_chunks)} high-quality chunks")
+        return high_quality_chunks
+
     def _apply_randomization_strategy(self, results, strategy='enhanced'):
         """
         Apply different randomization strategies to chunk selection results.
@@ -1232,9 +1928,48 @@ class EnhancedRAGQuery:
     def reset_used_papers(self):
         """Reset the list of used papers to allow reusing them."""
         previous_count = len(self.used_papers)
+        previous_usage_count = len(self.paper_usage_count)
         self.used_papers.clear()
+        self.paper_usage_count.clear()
         print(f"🔄 Reset used papers list. Previously used {previous_count} papers.")
+        print(f"🔄 Reset paper usage counts. Previously tracked {previous_usage_count} papers.")
         print("💡 You can now reuse papers that were previously selected.")
+    
+    def reset_deprioritization(self):
+        """Reset the deprioritization system to start fresh."""
+        self.reset_used_papers()
+        print("🎯 Deprioritization system reset. All papers will be treated equally.")
+    
+    def show_deprioritization_status(self):
+        """Show the current status of the deprioritization system."""
+        print(f"📊 Deprioritization System Status:")
+        print(f"   Total unique papers used: {len(self.paper_usage_count)}")
+        print(f"   Deprioritization factor: {self.deprioritization_factor * 100}% reduction per use")
+        
+        if self.paper_usage_count:
+            # Show usage distribution
+            usage_counts = list(self.paper_usage_count.values())
+            max_usage = max(usage_counts)
+            avg_usage = sum(usage_counts) / len(usage_counts)
+            
+            print(f"   Usage statistics:")
+            print(f"     Maximum uses per paper: {max_usage}")
+            print(f"     Average uses per paper: {avg_usage:.1f}")
+            
+            # Show papers with highest usage
+            most_used = sorted(self.paper_usage_count.items(), key=lambda x: x[1], reverse=True)[:5]
+            print(f"   Most frequently used papers:")
+            for paper_id, count in most_used:
+                if paper_id.startswith('doi:'):
+                    print(f"     - DOI: {paper_id[4:]} (used {count} times)")
+                elif paper_id.startswith('title:'):
+                    print(f"     - Title: {paper_id[6:][:50]}... (used {count} times)")
+                else:
+                    print(f"     - {paper_id[:50]}... (used {count} times)")
+        else:
+            print("   No papers have been used yet.")
+        
+        print(f"   💡 Use 'reset_deprioritization' to clear all usage tracking")
 
     def show_used_papers_status(self):
         """Show the current status of used papers tracking with source breakdown."""
@@ -1292,16 +2027,16 @@ class EnhancedRAGQuery:
         print(f"   💡 Use 'reset_papers' to clear the used papers list and allow reusing papers")
 
     @staticmethod
-    def automated_verdict(accuracy, novelty, relevancy, accuracy_threshold=80, novelty_threshold=85, relevancy_threshold=50):
+    def automated_verdict(accuracy, novelty, relevancy, accuracy_threshold=4, novelty_threshold=4, relevancy_threshold=3):
         if accuracy is not None and novelty is not None and relevancy is not None:
             return "ACCEPTED" if (accuracy >= accuracy_threshold and novelty >= novelty_threshold and relevancy >= relevancy_threshold) else "REJECTED"
         return "REJECTED"
 
     def iterative_hypothesis_generation(self, user_prompt, max_rounds=5, n=3):
         """Run generator-critic feedback loop for each hypothesis until accepted (>=90% accuracy/novelty and verdict ACCEPT)."""
-        novelty_threshold = 85
-        accuracy_threshold = 80
-        relevancy_threshold = 50
+        novelty_threshold = 4
+        accuracy_threshold = 4
+        relevancy_threshold = 3
         if not self.hypothesis_generator or not self.hypothesis_critic:
             print("[iterative_hypothesis_generation] ERROR: Hypothesis tools not initialized. Check if Gemini API key is available.")
             return
@@ -1328,8 +2063,9 @@ class EnhancedRAGQuery:
                 return
 
             try:
+                # Context chunks are already filtered during retrieval
                 context_texts = [chunk.get("document", "") if isinstance(chunk, dict) else chunk for chunk in context_chunks]
-                hypothesis_list = self.hypothesis_generator.generate(context_texts, n=1)
+                hypothesis_list = self.hypothesis_generator.generate(context_texts, n=1, meta_hypothesis=user_prompt)
                 if hypothesis_list:
                     hypotheses.append(hypothesis_list[0])
                     print(f"[iterative_hypothesis_generation] Generated hypothesis {i+1} with {len(context_chunks)} unique chunks")
@@ -1356,6 +2092,7 @@ class EnhancedRAGQuery:
                     print(f"[iterative_hypothesis_generation] Critique Round {rounds[i]} for Hypothesis {i+1} (5-minute timer started)...")
                     self.hypothesis_timer.start()
                     try:
+                        # Context chunks are already filtered during retrieval
                         context_texts = [chunk.get("document", "") if isinstance(chunk, dict) else chunk for chunk in context_chunks]
                         if self.hypothesis_timer.check_expired():
                             print(f"[iterative_hypothesis_generation] TIMEOUT: Hypothesis {i+1} critique timed out.")
@@ -1371,7 +2108,7 @@ class EnhancedRAGQuery:
                             })
                             pbar.update(1)
                             continue
-                        critique_result = self.hypothesis_critic.critique(hypotheses[i], context_texts, prompt=user_prompt, lab_goals=get_lab_goals())
+                        critique_result = self.hypothesis_critic.critique(hypotheses[i], context_texts, prompt=user_prompt, lab_goals=get_lab_goals(), meta_hypothesis=user_prompt)
                         if self.hypothesis_timer.check_expired():
                             print(f"[iterative_hypothesis_generation] TIMEOUT: Hypothesis {i+1} critique timed out after critique.")
                             citations = self.extract_citations_from_chunks(context_chunks)
@@ -1416,8 +2153,9 @@ class EnhancedRAGQuery:
                                 pbar.update(1)
                                 continue
                             try:
+                                # Context chunks are already filtered during retrieval
                                 context_texts = [chunk.get("document", "") if isinstance(chunk, dict) else chunk for chunk in context_chunks]
-                                new_hypothesis = self.hypothesis_generator.generate(context_texts, n=1)
+                                new_hypothesis = self.hypothesis_generator.generate(context_texts, n=1, meta_hypothesis=user_prompt)
                                 if new_hypothesis:
                                     hypotheses[i] = new_hypothesis[0]
                             except Exception as e:
@@ -1548,9 +2286,9 @@ class EnhancedRAGQuery:
             print(f"   ... and {len(self.current_package['chunks']) - 3} more chunks")
 
     def generate_hypotheses_from_package(self, n=5):
-        novelty_threshold = 85
-        accuracy_threshold = 80
-        relevancy_threshold = 50
+        novelty_threshold = 4
+        accuracy_threshold = 4
+        relevancy_threshold = 3
         if not self.current_package["chunks"]:
             print("❌ Package is empty. Add some chunks first.")
             return
@@ -1673,11 +2411,12 @@ class EnhancedRAGQuery:
             hypothesis = hypothesis_list[0]
             
             # Validate hypothesis format before proceeding
-            from hypothesis_tools import validate_hypothesis_format
+            from src.ai.hypothesis_tools import validate_hypothesis_format
             is_valid_format, format_reason = validate_hypothesis_format(hypothesis)
             if not is_valid_format:
                 print(f"❌ Hypothesis rejected due to format: {format_reason}")
-                # Record format rejection
+                print(f"⏭️  Skipping critique for format-rejected hypothesis")
+                # Record format rejection without critique
                 format_rejected_record = {
                     'Hypothesis': hypothesis,
                     'Accuracy': None,
@@ -1793,14 +2532,32 @@ class EnhancedRAGQuery:
             # Extract citations from the metadata
             for metadata in dynamic_metadata:
                 if metadata:
-                    source_name = metadata.get('source_name', 'Unknown')
+                    source_name = metadata.get('source_name', metadata.get('source', 'Unknown'))
                     title = metadata.get('title', 'No title')
                     doi = metadata.get('doi', 'No DOI')
-                    authors = metadata.get('author', metadata.get('authors', 'Unknown authors'))
-                    journal = metadata.get('journal', 'Unknown journal')
-                    # Extract year from publication_date
-                    publication_date = metadata.get('publication_date', '')
-                    year = publication_date[:4] if publication_date and len(publication_date) >= 4 else 'Unknown year'
+                    
+                    # Try multiple field names for authors
+                    authors = (metadata.get('author') or 
+                             metadata.get('authors') or 
+                             metadata.get('author_list') or 
+                             'Unknown authors')
+                    
+                    # Try multiple field names for journal
+                    journal = (metadata.get('journal') or 
+                              metadata.get('journal_name') or 
+                              metadata.get('publication_venue') or 
+                              'Unknown journal')
+                    
+                    # Extract year from publication_date or other date fields
+                    publication_date = (metadata.get('publication_date') or 
+                                       metadata.get('date') or 
+                                       metadata.get('year') or 
+                                       '')
+                    
+                    if publication_date and len(str(publication_date)) >= 4:
+                        year = str(publication_date)[:4]
+                    else:
+                        year = 'Unknown year'
 
                     citation = {
                         'source_name': source_name,
@@ -1874,9 +2631,16 @@ class EnhancedRAGQuery:
             try:
                 # Check rate limit before making API call
                 remaining_requests = self.gemini_rate_limiter.get_remaining_requests()
-                if remaining_requests <= 0:
-                    print(f"⏳ Gemini API rate limit reached. Waiting for reset...")
-                    self.gemini_rate_limiter.wait_if_needed()
+                remaining_tokens = self.gemini_rate_limiter.get_remaining_tokens()
+                
+                # Estimate tokens for hypothesis generation (prompt + context + response)
+                # Use only a small sample of context for token estimation to avoid false quota limits
+                context_sample = " ".join(generation_chunks[:1])[:2000]  # Limit to first chunk, max 2000 chars
+                estimated_tokens = self.gemini_rate_limiter.estimate_tokens(context_sample) + 1500  # Buffer for response
+                
+                if remaining_requests <= 0 or remaining_tokens < estimated_tokens:
+                    print(f"⏳ Gemini API quota limit reached. Requests: {remaining_requests}, Tokens: {remaining_tokens:,}/{estimated_tokens:,}")
+                    self.gemini_rate_limiter.wait_if_needed(estimated_tokens)
 
                 # Extract chunk text from the sample
                 generation_chunk_texts = [chunk for chunk in generation_chunks]
@@ -1885,8 +2649,16 @@ class EnhancedRAGQuery:
             except Exception as e:
                 error_str = str(e)
                 if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "quota" in error_str.lower():
-                    wait_time = (2 ** attempt) * 30 + random.randint(0, 10)  # Exponential backoff
-                    print(f"⚠️  API rate limited (attempt {attempt + 1}/{max_retries}). Waiting {wait_time}s...")
+                    # Extract retry delay from error message if available
+                    import re
+                    retry_match = re.search(r'Please retry in (\d+\.?\d*)s', error_str)
+                    if retry_match:
+                        wait_time = float(retry_match.group(1)) + 2  # Add 2s buffer
+                    else:
+                        wait_time = (2 ** attempt) * 30 + random.randint(0, 10)  # Exponential backoff
+                    
+                    print(f"⚠️  API quota exceeded (attempt {attempt + 1}/{max_retries}). Waiting {wait_time:.1f}s...")
+                    print(f"   Error: {error_str[:200]}...")
                     time.sleep(wait_time)
                     if attempt == max_retries - 1:
                         print("❌ Max retries reached. API quota exceeded.")
@@ -1909,19 +2681,34 @@ class EnhancedRAGQuery:
             try:
                 # Check rate limit before making API call
                 remaining_requests = self.gemini_rate_limiter.get_remaining_requests()
-                if remaining_requests <= 0:
-                    print(f"⏳ Gemini API rate limit reached. Waiting for reset...")
-                    self.gemini_rate_limiter.wait_if_needed()
+                remaining_tokens = self.gemini_rate_limiter.get_remaining_tokens()
+                
+                # Estimate tokens for critique generation (hypothesis + context + prompt + response)
+                # Use only a small sample of context for token estimation to avoid false quota limits
+                context_sample = " ".join(package_chunk_texts[:1])[:2000]  # Limit to first chunk, max 2000 chars
+                estimated_tokens = self.gemini_rate_limiter.estimate_tokens(hypothesis + context_sample + prompt) + 2000  # Buffer for response
+                
+                if remaining_requests <= 0 or remaining_tokens < estimated_tokens:
+                    print(f"⏳ Gemini API quota limit reached. Requests: {remaining_requests}, Tokens: {remaining_tokens:,}/{estimated_tokens:,}")
+                    self.gemini_rate_limiter.wait_if_needed(estimated_tokens)
 
                 # Extract chunk text from package chunks
                 package_chunk_texts = [chunk for chunk in package_chunks]
-                critique_result = self.hypothesis_critic.critique(hypothesis, package_chunk_texts, prompt=prompt, lab_goals=get_lab_goals())
+                critique_result = self.hypothesis_critic.critique(hypothesis, package_chunk_texts, prompt=prompt, lab_goals=get_lab_goals(), meta_hypothesis=prompt)
                 return critique_result
             except Exception as e:
                 error_str = str(e)
                 if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "quota" in error_str.lower():
-                    wait_time = (2 ** attempt) * 30 + random.randint(0, 10)  # Exponential backoff
-                    print(f"⚠️  API rate limited (attempt {attempt + 1}/{max_retries}). Waiting {wait_time}s...")
+                    # Extract retry delay from error message if available
+                    import re
+                    retry_match = re.search(r'Please retry in (\d+\.?\d*)s', error_str)
+                    if retry_match:
+                        wait_time = float(retry_match.group(1)) + 2  # Add 2s buffer
+                    else:
+                        wait_time = (2 ** attempt) * 30 + random.randint(0, 10)  # Exponential backoff
+                    
+                    print(f"⚠️  API quota exceeded (attempt {attempt + 1}/{max_retries}). Waiting {wait_time:.1f}s...")
+                    print(f"   Error: {error_str[:200]}...")
                     time.sleep(wait_time)
                     if attempt == max_retries - 1:
                         print("❌ Max retries reached. API quota exceeded.")
@@ -1997,7 +2784,7 @@ class EnhancedRAGQuery:
 
         return hypotheses[:n]
 
-    def generate_hypotheses_with_meta_generator(self, user_prompt: str, n_per_meta: int = 5, chunks_per_meta: int = 1500):
+    def generate_hypotheses_with_meta_generator(self, user_prompt: str, n_per_meta: int = 5, chunks_per_meta: int = 1500, progress_callback=None):
         """
         Generate hypotheses using the meta-hypothesis generator approach.
 
@@ -2024,10 +2811,14 @@ class EnhancedRAGQuery:
 
         # Step 1: Generate meta-hypotheses
         print(f"\n🔍 Step 1: Generating 5 meta-hypotheses from user query...")
+        if progress_callback:
+            progress_callback("Generating 5 meta-hypotheses from user query...", 50)
         try:
             meta_hypotheses = self.meta_hypothesis_generator.generate_meta_hypotheses(user_prompt)
             if not meta_hypotheses or len(meta_hypotheses) < 5:
                 print("❌ Failed to generate sufficient meta-hypotheses")
+                if progress_callback:
+                    progress_callback("Failed to generate sufficient meta-hypotheses", 0)
                 return None
 
             print(f"✅ Generated {len(meta_hypotheses)} meta-hypotheses:")
@@ -2035,6 +2826,8 @@ class EnhancedRAGQuery:
                 print(f"  {i}. {meta_hyp}")
         except Exception as e:
             print(f"❌ Error generating meta-hypotheses: {e}")
+            if progress_callback:
+                progress_callback("Error generating meta-hypotheses", 0)
             return None
 
         # Step 2: For each meta-hypothesis, generate hypotheses until exactly n_per_meta are accepted
@@ -2052,11 +2845,20 @@ class EnhancedRAGQuery:
 
         # Initialize hypothesis records for this session
         self.hypothesis_records = []
+        
+        # Reset deprioritization system for fresh citation diversity
+        self.reset_deprioritization()
+        print(f"🎯 Reset deprioritization system for maximum citation diversity across meta-hypotheses")
 
         for meta_idx, meta_hypothesis in enumerate(meta_hypotheses, 1):
             print(f"\n🔍 Step 2.{meta_idx}: Generating hypotheses for meta-hypothesis {meta_idx}/{total_meta_hypotheses}")
             print(f"Meta-hypothesis: {meta_hypothesis}")
             print("-" * 60)
+            
+            # Update progress for meta-hypothesis processing
+            if progress_callback:
+                progress_percentage = 50 + (meta_idx / total_meta_hypotheses) * 40  # 50-90% range
+                progress_callback(f"Processing meta-hypothesis {meta_idx}/{total_meta_hypotheses}: {meta_hypothesis[:50]}...", progress_percentage)
 
             # Generate hypotheses for this meta-hypothesis until exactly n_per_meta are accepted
             meta_hypotheses_generated = []
@@ -2078,8 +2880,8 @@ class EnhancedRAGQuery:
                         print(f"📚 Using {len(context_chunks)} dynamically selected chunks for generation")
                     else:
                         print(f"⚠️  Failed to select dynamic chunks, falling back to direct retrieval...")
-                        # Fallback: get fresh chunks directly
-                        context_chunks = self.retrieve_relevant_chunks(meta_hypothesis, top_k=chunks_per_meta)
+                        # Fallback: get fresh chunks with deprioritization for citation diversity
+                        context_chunks = self.retrieve_relevant_chunks_with_deprioritization(meta_hypothesis, top_k=chunks_per_meta)
                         if context_chunks:
                             print(f"📚 Using {len(context_chunks)} fresh chunks for generation")
                         else:
@@ -2087,21 +2889,20 @@ class EnhancedRAGQuery:
                             break
                 else:
                     print(f"📚 Using direct chunk retrieval (no dynamic selection available)...")
-                    # Get fresh chunks for each hypothesis attempt
-                    context_chunks = self.retrieve_relevant_chunks(meta_hypothesis, top_k=chunks_per_meta)
+                    # Get fresh chunks with deprioritization for each hypothesis attempt to ensure citation diversity
+                    context_chunks = self.retrieve_relevant_chunks_with_deprioritization(meta_hypothesis, top_k=chunks_per_meta)
                     if not context_chunks:
                         print(f"❌ No relevant context found for meta-hypothesis {meta_idx}. Skipping...")
                         break
                     print(f"📚 Using {len(context_chunks)} fresh chunks for generation")
 
-                # Start timer for this hypothesis
-                self.hypothesis_timer.start()
-                print(f"⏱️  Starting 5-minute timer for hypothesis attempt {attempts}...")
+                # Generate hypothesis without time limit
 
                 # Generate hypothesis
                 try:
+                    # Context chunks are already filtered during retrieval
                     context_texts = [chunk.get("document", "") if isinstance(chunk, dict) else chunk for chunk in context_chunks]
-                    hypothesis_list = self.hypothesis_generator.generate(context_texts, n=1)
+                    hypothesis_list = self.hypothesis_generator.generate(context_texts, n=1, meta_hypothesis=meta_hypothesis)
 
                     if not hypothesis_list:
                         print("❌ Failed to generate hypothesis. Skipping...")
@@ -2110,11 +2911,12 @@ class EnhancedRAGQuery:
                     hypothesis = hypothesis_list[0]
                     
                     # Validate hypothesis format before proceeding
-                    from hypothesis_tools import validate_hypothesis_format
+                    from src.ai.hypothesis_tools import validate_hypothesis_format
                     is_valid_format, format_reason = validate_hypothesis_format(hypothesis)
                     if not is_valid_format:
                         print(f"❌ Hypothesis rejected due to format: {format_reason}")
-                        # Record format rejection
+                        print(f"⏭️  Skipping critique for format-rejected hypothesis")
+                        # Record format rejection without critique
                         format_rejected_record = {
                             'Meta_Hypothesis': meta_hypothesis,
                             'Meta_Hypothesis_Index': meta_idx,
@@ -2134,14 +2936,11 @@ class EnhancedRAGQuery:
                     
                     print(f"📝 Generated: {hypothesis}")
 
-                    # Check timer before critique
-                    if self.hypothesis_timer.check_expired():
-                        print(f"⏰ Time limit reached before critique")
-                        continue
+                    # Proceed with critique
 
                     # Critique hypothesis
                     print(f"🔍 Critiquing hypothesis...")
-                    critique_result = self.hypothesis_critic.critique(hypothesis, context_texts, prompt=meta_hypothesis, lab_goals=get_lab_goals())
+                    critique_result = self.hypothesis_critic.critique(hypothesis, context_texts, prompt=meta_hypothesis, lab_goals=get_lab_goals(), meta_hypothesis=meta_hypothesis)
 
                     if critique_result:
                         novelty = critique_result.get('novelty')
@@ -2180,14 +2979,32 @@ class EnhancedRAGQuery:
                         if not citations and dynamic_metadata:
                             for metadata in dynamic_metadata:
                                 if metadata:
-                                    source_name = metadata.get('source_name', 'Unknown')
+                                    source_name = metadata.get('source_name', metadata.get('source', 'Unknown'))
                                     title = metadata.get('title', 'No title')
                                     doi = metadata.get('doi', 'No DOI')
-                                    authors = metadata.get('author', metadata.get('authors', 'Unknown authors'))
-                                    journal = metadata.get('journal', 'Unknown journal')
-                                    # Extract year from publication_date
-                                    publication_date = metadata.get('publication_date', '')
-                                    year = publication_date[:4] if publication_date and len(publication_date) >= 4 else 'Unknown year'
+                                    
+                                    # Try multiple field names for authors
+                                    authors = (metadata.get('author') or 
+                                             metadata.get('authors') or 
+                                             metadata.get('author_list') or 
+                                             'Unknown authors')
+                                    
+                                    # Try multiple field names for journal
+                                    journal = (metadata.get('journal') or 
+                                              metadata.get('journal_name') or 
+                                              metadata.get('publication_venue') or 
+                                              'Unknown journal')
+                                    
+                                    # Extract year from publication_date or other date fields
+                                    publication_date = (metadata.get('publication_date') or 
+                                                       metadata.get('date') or 
+                                                       metadata.get('year') or 
+                                                       '')
+                                    
+                                    if publication_date and len(str(publication_date)) >= 4:
+                                        year = str(publication_date)[:4]
+                                    else:
+                                        year = 'Unknown year'
 
                                     citation = {
                                         'source_name': source_name,
@@ -2205,6 +3022,15 @@ class EnhancedRAGQuery:
                                         unique_sources.add(citation_key)
                         
                         formatted_citations = self.format_citations_for_export(citations)
+
+                        # Track papers used for deprioritization to ensure citation diversity
+                        for chunk in context_chunks:
+                            if isinstance(chunk, dict) and 'metadata' in chunk:
+                                metadata = chunk['metadata']
+                                paper_id = self._get_paper_identifier(metadata)
+                                if paper_id:
+                                    self.paper_usage_count[paper_id] = self.paper_usage_count.get(paper_id, 0) + 1
+                                    self.used_papers.add(paper_id)
 
                         # Create record
                         record = {
@@ -2228,19 +3054,19 @@ class EnhancedRAGQuery:
 
                         # Display result
                         print(f"\n📊 Hypothesis Result:")
-                        print(f"   Novelty: {novelty}/85")
-                        print(f"   Accuracy: {accuracy}/80")
-                        print(f"   Relevancy: {relevancy}/50")
+                        print(f"   Novelty: {novelty}/4")
+                        print(f"   Accuracy: {accuracy}/4")
+                        print(f"   Relevancy: {relevancy}/3")
                         print(f"   Verdict: {verdict}")
 
                         # Print rejection reason if hypothesis is rejected
                         if verdict != 'ACCEPTED':
-                            if accuracy < 80:
-                                print(f"❌ Hypothesis rejected: Low accuracy score ({accuracy}/80)")
-                            elif novelty < 85:
-                                print(f"❌ Hypothesis rejected: Low novelty score ({novelty}/85)")
-                            elif relevancy < 50:
-                                print(f"❌ Hypothesis rejected: Low relevancy score ({relevancy}/50)")
+                            if accuracy < 4:
+                                print(f"❌ Hypothesis rejected: Low accuracy score ({accuracy}/4)")
+                            elif novelty < 4:
+                                print(f"❌ Hypothesis rejected: Low novelty score ({novelty}/4)")
+                            elif relevancy < 3:
+                                print(f"❌ Hypothesis rejected: Low relevancy score ({relevancy}/3)")
                             else:
                                 print(f"❌ Hypothesis rejected: Unknown reason")
 
@@ -2256,10 +3082,7 @@ class EnhancedRAGQuery:
                         else:
                             print(f"❌ Hypothesis rejected for meta-hypothesis {meta_idx}")
 
-                        # Check timer
-                        if self.hypothesis_timer.check_expired():
-                            print(f"⏰ Time limit reached for meta-hypothesis {meta_idx}. Moving to next meta-hypothesis.")
-                            break
+                        # Continue generating hypotheses until we have enough accepted ones
 
                 except Exception as e:
                     print(f"❌ Error generating/critiquing hypothesis: {e}")
@@ -2287,14 +3110,21 @@ class EnhancedRAGQuery:
             print(f"📊 All results have been incrementally saved to: {excel_filename}")
             print(f"📁 File location: {os.path.dirname(os.path.abspath(excel_filename))}")
 
-            # Also create a final comprehensive export
-            final_export_filename = self.export_hypotheses_to_excel()
-            if final_export_filename:
-                print(f"📋 Comprehensive results also exported to: {final_export_filename}")
+            # Create comprehensive export with popup notification
+            print(f"\n📦 Creating comprehensive export...")
+            comprehensive_export_path = self.create_comprehensive_export()
+            if comprehensive_export_path:
+                print(f"📋 Comprehensive results exported to: {comprehensive_export_path}")
             else:
                 print(f"⚠️  Comprehensive export failed, but incremental saves are complete")
+            
+            # Final progress callback
+            if progress_callback:
+                progress_callback(f"✅ Meta-hypothesis generation completed! Generated {len(all_hypotheses)} hypotheses", 100)
         else:
             print(f"❌ No hypotheses were successfully generated")
+            if progress_callback:
+                progress_callback("❌ No hypotheses were successfully generated", 0)
 
         return all_hypotheses
 
@@ -2358,9 +3188,70 @@ class EnhancedRAGQuery:
                 return np.array(self.get_google_embedding(text))
             self.hypothesis_critic = HypothesisCritic(model=self.gemini_client, embedding_fn=embedding_fn)
             self.meta_hypothesis_generator = MetaHypothesisGenerator(model=self.gemini_client)
-            print("✅ Hypothesis tools initialized successfully.")
+            
+            # Connect rate limiter to hypothesis tools
+            self.hypothesis_generator.rate_limiter = self.gemini_rate_limiter
+            self.hypothesis_critic.rate_limiter = self.gemini_rate_limiter
+            self.meta_hypothesis_generator.rate_limiter = self.gemini_rate_limiter
+            
+            print("✅ Hypothesis tools initialized successfully with rate limiting.")
         else:
             print("⚠️ Gemini client not initialized, skipping hypothesis tools.")
+
+    def get_performance_stats(self):
+        """Get performance statistics for the system."""
+        avg_query_time = self.total_query_time / max(self.query_count, 1)
+        cache_hit_rate = len(self.cache) / max(self.query_count, 1) * 100
+        
+        return {
+            "total_queries": self.query_count,
+            "total_query_time": self.total_query_time,
+            "average_query_time": avg_query_time,
+            "cache_size": len(self.cache),
+            "cache_hit_rate": cache_hit_rate,
+            "performance_log_entries": len(self.performance_log)
+        }
+
+    def clear_cache(self):
+        """Clear the performance cache."""
+        self.cache.clear()
+        logger.info("🧹 Performance cache cleared")
+
+    def log_performance(self, operation: str, duration: float, details: dict = None):
+        """Log performance metrics for an operation."""
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "operation": operation,
+            "duration": duration,
+            "details": details or {}
+        }
+        
+        self.performance_log.append(log_entry)
+        
+        # Keep only last 1000 entries to prevent memory issues
+        if len(self.performance_log) > 1000:
+            self.performance_log = self.performance_log[-1000:]
+        
+        logger.info(f"📊 Performance: {operation} took {duration:.2f}s")
+
+    def optimize_memory_usage(self):
+        """Optimize memory usage by clearing unused data."""
+        # Clear cache if it's too large
+        if len(self.cache) > self.cache_max_size:
+            # Keep only most recent entries
+            cache_items = list(self.cache.items())
+            self.cache = dict(cache_items[-self.cache_max_size//2:])
+            logger.info(f"🧹 Reduced cache size to {len(self.cache)} entries")
+        
+        # Clear used papers set if it's too large
+        if len(self.used_papers) > 10000:
+            self.used_papers.clear()
+            logger.info("🧹 Cleared used papers set")
+        
+        # Clear performance log if it's too large
+        if len(self.performance_log) > 1000:
+            self.performance_log = self.performance_log[-500:]
+            logger.info("🧹 Reduced performance log size")
 
     def export_hypotheses_to_excel(self, filename=None):
         """Export hypothesis records to Excel file with grouping by meta-hypothesis."""
@@ -2668,9 +3559,9 @@ class EnhancedRAGQuery:
         print()
 
     def interactive_search(self):
-        novelty_threshold = 85
-        accuracy_threshold = 80
-        relevancy_threshold = 50
+        novelty_threshold = 4
+        accuracy_threshold = 4
+        relevancy_threshold = 3
         print("=== Enhanced RAG Query System ===")
         print("🔍 Search across all your knowledge bases!")
         self._display_commands()
@@ -2985,14 +3876,32 @@ class EnhancedRAGQuery:
                             for result in results:
                                 metadata = result.get('metadata', {})
                                 if metadata:
-                                    source_name = metadata.get('source_name', 'Unknown')
+                                    source_name = metadata.get('source_name', metadata.get('source', 'Unknown'))
                                     title = metadata.get('title', 'No title')
                                     doi = metadata.get('doi', 'No DOI')
-                                    authors = metadata.get('author', metadata.get('authors', 'Unknown authors'))
-                                    journal = metadata.get('journal', 'Unknown journal')
-                                    # Extract year from publication_date
-                                    publication_date = metadata.get('publication_date', '')
-                                    year = publication_date[:4] if publication_date and len(publication_date) >= 4 else 'Unknown year'
+                                    
+                                    # Try multiple field names for authors
+                                    authors = (metadata.get('author') or 
+                                             metadata.get('authors') or 
+                                             metadata.get('author_list') or 
+                                             'Unknown authors')
+                                    
+                                    # Try multiple field names for journal
+                                    journal = (metadata.get('journal') or 
+                                              metadata.get('journal_name') or 
+                                              metadata.get('publication_venue') or 
+                                              'Unknown journal')
+                                    
+                                    # Extract year from publication_date or other date fields
+                                    publication_date = (metadata.get('publication_date') or 
+                                                       metadata.get('date') or 
+                                                       metadata.get('year') or 
+                                                       '')
+                                    
+                                    if publication_date and len(str(publication_date)) >= 4:
+                                        year = str(publication_date)[:4]
+                                    else:
+                                        year = 'Unknown year'
 
                                     citation = {
                                         'source_name': source_name,
@@ -3106,27 +4015,92 @@ class EnhancedRAGQuery:
                 print("❌ Unknown command. Available commands: 'add', 'clear', 'export', 'records', 'clear_records'")
                 self._display_commands()
 
-    def run_comprehensive_hypothesis_session(self, query, max_hypotheses=5):
+    def run_comprehensive_hypothesis_session(self, query, max_hypotheses=5, hypotheses_per_meta=None, progress_callback=None):
         """
-        Run a comprehensive hypothesis generation session with all features:
+        Run a comprehensive hypothesis generation session using META HYPOTHESIS GENERATION by default.
+        This method now uses the meta-hypothesis generator approach which:
+        - Generates 5 meta-hypotheses from the user query
+        - For each meta-hypothesis, generates hypotheses until exactly 5 are accepted
+        - Provides maximum diversity and comprehensive coverage
+        
+        Features:
+        - Meta-hypothesis generation for diverse research directions
         - Timer-controlled critique process
         - Automated verdict determination
         - Citation tracking
         - Excel export
+        - Progress callbacks for GUI integration
         """
         print("=" * 80)
-        print("🧠 COMPREHENSIVE HYPOTHESIS GENERATION SESSION")
+        print("🧠 COMPREHENSIVE META-HYPOTHESIS GENERATION SESSION")
         print("=" * 80)
         print(f"Query: {query}")
-        print(f"Features: 5-minute timer per hypothesis, automated verdicts, citation tracking, Excel export")
+        print(f"Features: Meta-hypothesis generation, automated verdicts, citation tracking, Excel export")
         print("=" * 80)
 
         # Clear previous records
         self.clear_hypothesis_records()
 
-        # Run hypothesis generation
-        print(f"\n🔍 Searching for relevant context...")
-        context_chunks = self.retrieve_relevant_chunks(query, top_k=1500)
+        # Use meta hypothesis generation by default
+        print(f"\n🧠 Using META-HYPOTHESIS GENERATION for maximum diversity and comprehensive coverage...")
+        if progress_callback:
+            progress_callback("Generating 5 meta-hypotheses from user query...", 50)
+        
+        # Use user-specified hypotheses per meta-hypothesis, or calculate from max_hypotheses
+        if hypotheses_per_meta is not None:
+            n_per_meta = hypotheses_per_meta
+            print(f"📊 Using user-specified value: {n_per_meta} hypotheses per meta-hypothesis")
+        else:
+            # Calculate how many hypotheses per meta-hypothesis we need
+            # We want to generate 5 meta-hypotheses, and get max_hypotheses total accepted hypotheses
+            n_per_meta = max(1, max_hypotheses // 5)  # Distribute hypotheses across meta-hypotheses
+            print(f"📊 Calculated value: {n_per_meta} hypotheses per meta-hypothesis (from max_hypotheses={max_hypotheses})")
+        
+        # Use the meta hypothesis generation method
+        all_hypotheses = self.generate_hypotheses_with_meta_generator(
+            user_prompt=query,
+            n_per_meta=n_per_meta,
+            chunks_per_meta=1500,
+            progress_callback=progress_callback
+        )
+        
+        if all_hypotheses:
+            print(f"\n✅ Meta-hypothesis generation completed!")
+            print(f"📊 Total accepted hypotheses generated: {len(all_hypotheses)}")
+            if progress_callback:
+                progress_callback("Meta-hypothesis generation completed successfully!", 90)
+            
+            # Return the hypotheses in the expected format
+            accepted_hypotheses = []
+            for record in all_hypotheses:
+                if isinstance(record, dict):
+                    hypothesis_text = record.get('Hypothesis', '')
+                    if hypothesis_text:
+                        accepted_hypotheses.append(record)
+            
+            return accepted_hypotheses[:max_hypotheses]  # Limit to requested number
+        else:
+            print("❌ Meta-hypothesis generation failed. Falling back to regular generation...")
+            if progress_callback:
+                progress_callback("Meta-hypothesis generation failed, falling back to regular generation...", 70)
+            
+            # Fallback to regular generation if meta generation fails
+            return self._run_regular_hypothesis_generation(query, max_hypotheses)
+
+    def _run_regular_hypothesis_generation(self, query, max_hypotheses=5):
+        """
+        Fallback method for regular hypothesis generation (original implementation).
+        """
+        print("=" * 80)
+        print("🧠 REGULAR HYPOTHESIS GENERATION (FALLBACK)")
+        print("=" * 80)
+        print(f"Query: {query}")
+        print(f"Features: 5-minute timer per hypothesis, automated verdicts, citation tracking, Excel export")
+        print("=" * 80)
+
+        # Run hypothesis generation with deprioritization for maximum citation diversity
+        print(f"\n🔍 Searching for relevant context with deprioritization...")
+        context_chunks = self.retrieve_relevant_chunks_with_deprioritization(query, top_k=1500)
         if not context_chunks:
             print("❌ No relevant context found.")
             return None
@@ -3147,16 +4121,21 @@ class EnhancedRAGQuery:
 
             # ALWAYS select new chunks for EVERY hypothesis attempt to ensure diversity
             if self.use_chromadb and self.chroma_manager and self.initial_add_quantity:
-                print(f"🔄 Selecting new chunks for hypothesis attempt {attempts}...")
+                print(f"🔄 Selecting new chunks with deprioritization for hypothesis attempt {attempts}...")
                 randomization_strategy = getattr(self, 'randomization_strategy', 'enhanced')
                 dynamic_chunks = self.select_dynamic_chunks_for_generation(query, randomization_strategy=randomization_strategy)
                 if dynamic_chunks:
                     context_chunks = dynamic_chunks
                     print(f"📚 Using {len(context_chunks)} dynamically selected chunks for generation")
                 else:
-                    print(f"⚠️  Failed to select dynamic chunks, using original chunks")
+                    print(f"⚠️  Failed to select dynamic chunks, using deprioritized retrieval...")
+                    # Fallback to deprioritized retrieval
+                    context_chunks = self.retrieve_relevant_chunks_with_deprioritization(query, top_k=1500)
+                    print(f"📚 Using {len(context_chunks)} deprioritized chunks for generation")
             else:
-                print(f"📚 Using original chunks for generation (no dynamic selection available)")
+                print(f"📚 Using deprioritized retrieval for generation...")
+                context_chunks = self.retrieve_relevant_chunks_with_deprioritization(query, top_k=1500)
+                print(f"📚 Using {len(context_chunks)} deprioritized chunks for generation")
 
             # Start timer
             self.hypothesis_timer.start()
@@ -3164,17 +4143,22 @@ class EnhancedRAGQuery:
 
             # Generate hypothesis
             try:
+                # Context chunks are already filtered during retrieval
                 context_texts = [chunk.get("document", "") if isinstance(chunk, dict) else chunk for chunk in context_chunks]
-                hypothesis_list = self.hypothesis_generator.generate(context_texts, n=1)
+                hypothesis_list = self.hypothesis_generator.generate(context_texts, n=1, meta_hypothesis=query)
+                # Add rate limiting delay to prevent hitting quota limits
+                import time
+                import random
+                time.sleep(2.0 + random.uniform(0.2, 0.8))  # Increased delay for token quota
 
                 if not hypothesis_list:
-                    print("❌ Failed to generate hypothesis")
+                    print("❌ Failed to generate hypothesis (all hypotheses rejected due to format issues)")
                     self.hypothesis_records.append({
-                        'Hypothesis': f'Failed generation attempt {attempts}',
+                        'Hypothesis': f'Failed generation attempt {attempts} - all hypotheses rejected',
                         'Accuracy': None,
                         'Novelty': None,
                         'Verdict': 'GENERATION_FAILED',
-                        'Critique': 'Failed to generate hypothesis',
+                        'Critique': 'All generated hypotheses were rejected due to format validation failures',
                         'Citations': 'No citations available'
                     })
                     continue
@@ -3182,11 +4166,12 @@ class EnhancedRAGQuery:
                 hypothesis = hypothesis_list[0]
                 
                 # Validate hypothesis format before proceeding
-                from hypothesis_tools import validate_hypothesis_format
+                from src.ai.hypothesis_tools import validate_hypothesis_format
                 is_valid_format, format_reason = validate_hypothesis_format(hypothesis)
                 if not is_valid_format:
                     print(f"❌ Hypothesis rejected due to format: {format_reason}")
-                    # Record format rejection
+                    print(f"⏭️  Skipping critique for format-rejected hypothesis")
+                    # Record format rejection without critique
                     format_rejected_record = {
                         'Hypothesis': hypothesis,
                         'Accuracy': None,
@@ -3215,7 +4200,11 @@ class EnhancedRAGQuery:
 
                 # Critique hypothesis
                 print(f"🔍 Critiquing hypothesis...")
-                critique_result = self.hypothesis_critic.critique(hypothesis, context_texts, prompt=query, lab_goals=get_lab_goals())
+                critique_result = self.hypothesis_critic.critique(hypothesis, context_texts, prompt=query, lab_goals=get_lab_goals(), meta_hypothesis=query)
+                # Add rate limiting delay to prevent hitting quota limits
+                import time
+                import random
+                time.sleep(2.0 + random.uniform(0.2, 0.8))  # Increased delay for token quota
 
                 # Check timer after critique
                 if self.hypothesis_timer.check_expired():
@@ -3234,7 +4223,7 @@ class EnhancedRAGQuery:
                 novelty = critique_result.get('novelty', 0)
                 accuracy = critique_result.get('accuracy', 0)
                 relevancy = critique_result.get('relevancy', 0)
-                verdict = self.automated_verdict(accuracy, novelty, relevancy, accuracy_threshold=80, novelty_threshold=85, relevancy_threshold=50)
+                verdict = self.automated_verdict(accuracy, novelty, relevancy, accuracy_threshold=4, novelty_threshold=4, relevancy_threshold=3)
                 remaining_time = self.hypothesis_timer.get_remaining_time()
 
                 print(f"📊 Scores: Accuracy={accuracy}, Novelty={novelty}, Relevancy={relevancy}")
@@ -3284,7 +4273,7 @@ class EnhancedRAGQuery:
 
         # Final summary
         print(f"\n" + "=" * 80)
-        print(f"🏁 SESSION COMPLETE")
+        print(f"🏁 REGULAR GENERATION SESSION COMPLETE")
         print(f"=" * 80)
         print(f"Total attempts: {attempts}")
         print(f"Accepted hypotheses: {len(accepted_hypotheses)}")
@@ -3297,6 +4286,14 @@ class EnhancedRAGQuery:
         if export_filename:
             print(f"✅ Results exported to: {export_filename}")
             print(f"📁 File saved in: {os.path.dirname(os.path.abspath(export_filename))}")
+            
+            # Create comprehensive export with popup notification
+            print(f"\n📦 Creating comprehensive export...")
+            comprehensive_export_path = self.create_comprehensive_export()
+            if comprehensive_export_path:
+                print(f"📋 Comprehensive results exported to: {comprehensive_export_path}")
+            else:
+                print(f"⚠️  Comprehensive export failed, but Excel export is complete")
         else:
             print(f"❌ Export failed")
 
@@ -3304,7 +4301,7 @@ class EnhancedRAGQuery:
 
     def generate_hypotheses_with_per_hypothesis_timer(self, n=5, max_rounds=10, filename=None):
         """
-        Generate n hypotheses, using a 5-minute timer for the entire process of generating and refining each hypothesis.
+        Generate n hypotheses with optimized timer (1-minute timeout) and performance monitoring.
         After each iteration, print the result, time left, scores, and hypothesis text.
         Save every iteration in self.hypothesis_records and append to Excel after each iteration.
         Adds empty verifier columns separated by an empty column.
@@ -3318,12 +4315,16 @@ class EnhancedRAGQuery:
         if not self.hypothesis_generator or not self.hypothesis_critic:
             print("❌ Hypothesis tools not initialized. Check if Gemini API key is available.")
             return
-        novelty_threshold = 85
-        accuracy_threshold = 80
-        relevancy_threshold = 50
-        print(f"\n🧠 Generating {n} hypotheses (5-minute timer per hypothesis)...")
+        novelty_threshold = 4
+        accuracy_threshold = 4
+        relevancy_threshold = 3
+        print(f"\n🧠 Generating {n} hypotheses (1-minute timer per hypothesis with performance monitoring)...")
         print(f"📦 Using {len(self.current_package['chunks'])} package chunks for critique")
         print(f"[INFO] Acceptance criteria: Novelty >= {novelty_threshold}, Accuracy >= {accuracy_threshold}, Relevancy >= {relevancy_threshold}")
+        
+        # Start performance monitoring
+        start_time = time.time()
+        self.log_performance("hypothesis_generation_start", 0, {"n_hypotheses": n, "max_rounds": max_rounds})
         package_chunks = self.current_package["chunks"]
         self.hypothesis_records = []  # Clear previous records
         # Prepare Excel file
@@ -3360,19 +4361,441 @@ class EnhancedRAGQuery:
 
             self.hypothesis_timer.start()
             time_left = self.hypothesis_timer.get_remaining_time()
-            hypothesis_list = self.hypothesis_generator.generate(context_texts, n=1)
-            if not hypothesis_list:
-                print("❌ Failed to generate hypothesis. Skipping...")
+            
+            # Add timeout protection for hypothesis generation
+            try:
+                hypothesis_list = self.hypothesis_generator.generate(context_texts, n=1)
+                if not hypothesis_list:
+                    print("❌ Failed to generate hypothesis. Skipping...")
+                    continue
+            except Exception as e:
+                logger.error(f"❌ Error generating hypothesis: {e}")
+                print(f"❌ Error generating hypothesis: {e}")
                 continue
                 
             hypothesis = hypothesis_list[0]
             
             # Validate hypothesis format before proceeding
-            from hypothesis_tools import validate_hypothesis_format
+            from src.ai.hypothesis_tools import validate_hypothesis_format
             is_valid_format, format_reason = validate_hypothesis_format(hypothesis)
             if not is_valid_format:
                 print(f"❌ Hypothesis rejected due to format: {format_reason}")
-                # Record format rejection
+                print(f"⏭️  Skipping critique for format-rejected hypothesis")
+                # Record format rejection without critique
+                format_rejected_record = {
+                    'HypothesisNumber': hyp_idx+1,
+                    'Iteration': 0,
+                    'Status': 'FORMAT_REJECTED',
+                    'Hypothesis': hypothesis,
+                    'Novelty': None,
+                    'Accuracy': None,
+                    'Critique': f'Hypothesis rejected: {format_reason}',
+                    'TimeLeft': int(time_left),
+                    '': '',
+                    'Verifier Novelty Score (0-100)': '',
+                    'Verifier Accuracy Score (0-100)': '',
+                    'Verifier Verdict (accept, refuse)': ''
+                }
+                self.hypothesis_records.append(format_rejected_record)
+                # Append to Excel
+                try:
+                    df = pd.DataFrame([format_rejected_record])
+                    with pd.ExcelWriter(filename, mode='a', engine='openpyxl', if_sheet_exists='overlay') as writer:
+                        df.to_excel(writer, index=False, header=False, startrow=writer.sheets['Sheet1'].max_row)
+                except Exception as e:
+                    print(f"❌ Error appending to Excel: {e}")
+                continue
+            
+            print(f"📝 Generated: {hypothesis}")
+            
+            # Check timer before critique
+            if self.hypothesis_timer.check_expired():
+                print(f"⏰ Time limit reached before critique")
+                timeout_record = {
+                    'HypothesisNumber': hyp_idx+1,
+                    'Iteration': 0,
+                    'Status': 'TIMEOUT',
+                    'Hypothesis': hypothesis,
+                    'Novelty': None,
+                    'Accuracy': None,
+                    'Critique': 'Process timed out before critique',
+                    'TimeLeft': 0,
+                    '': '',
+                    'Verifier Novelty Score (0-100)': '',
+                    'Verifier Accuracy Score (0-100)': '',
+                    'Verifier Verdict (accept, refuse)': ''
+                }
+                self.hypothesis_records.append(timeout_record)
+                # Append to Excel
+                try:
+                    df = pd.DataFrame([timeout_record])
+                    with pd.ExcelWriter(filename, mode='a', engine='openpyxl', if_sheet_exists='overlay') as writer:
+                        df.to_excel(writer, index=False, header=False, startrow=writer.sheets['Sheet1'].max_row)
+                except Exception as e:
+                    print(f"❌ Error appending to Excel: {e}")
+                continue
+
+            # Critique hypothesis
+            print(f"🔍 Critiquing hypothesis...")
+            try:
+                critique_result = self.hypothesis_critic.critique(hypothesis, context_texts, prompt="package query", lab_goals=get_lab_goals(), meta_hypothesis="package query")
+            except Exception as e:
+                print(f"❌ Error during critique: {e}")
+                error_record = {
+                    'HypothesisNumber': hyp_idx+1,
+                    'Iteration': 0,
+                    'Status': 'CRITIQUE_ERROR',
+                    'Hypothesis': hypothesis,
+                    'Novelty': None,
+                    'Accuracy': None,
+                    'Critique': f'Critique error: {str(e)}',
+                    'TimeLeft': int(self.hypothesis_timer.get_remaining_time()),
+                    '': '',
+                    'Verifier Novelty Score (0-100)': '',
+                    'Verifier Accuracy Score (0-100)': '',
+                    'Verifier Verdict (accept, refuse)': ''
+                }
+                self.hypothesis_records.append(error_record)
+                # Append to Excel
+                try:
+                    df = pd.DataFrame([error_record])
+                    with pd.ExcelWriter(filename, mode='a', engine='openpyxl', if_sheet_exists='overlay') as writer:
+                        df.to_excel(writer, index=False, header=False, startrow=writer.sheets['Sheet1'].max_row)
+                except Exception as e:
+                    print(f"❌ Error appending to Excel: {e}")
+                continue
+            
+            # Check timer after critique
+            if self.hypothesis_timer.check_expired():
+                print(f"⏰ Time limit reached after critique")
+                timeout_record = {
+                    'HypothesisNumber': hyp_idx+1,
+                    'Iteration': 0,
+                    'Status': 'TIMEOUT',
+                    'Hypothesis': hypothesis,
+                    'Novelty': critique_result.get('novelty', None),
+                    'Accuracy': critique_result.get('accuracy', None),
+                    'Critique': critique_result.get('critique', '') + ' [Process timed out]',
+                    'TimeLeft': 0,
+                    '': '',
+                    'Verifier Novelty Score (0-100)': '',
+                    'Verifier Accuracy Score (0-100)': '',
+                    'Verifier Verdict (accept, refuse)': ''
+                }
+                self.hypothesis_records.append(timeout_record)
+                # Append to Excel
+                try:
+                    df = pd.DataFrame([timeout_record])
+                    with pd.ExcelWriter(filename, mode='a', engine='openpyxl', if_sheet_exists='overlay') as writer:
+                        df.to_excel(writer, index=False, header=False, startrow=writer.sheets['Sheet1'].max_row)
+                except Exception as e:
+                    print(f"❌ Error appending to Excel: {e}")
+                continue
+
+            # Extract scores and determine verdict
+            novelty = critique_result.get('novelty', 0)
+            accuracy = critique_result.get('accuracy', 0)
+            relevancy = critique_result.get('relevancy', 0)
+            verdict = self.automated_verdict(accuracy, novelty, relevancy, accuracy_threshold, novelty_threshold, relevancy_threshold)
+            remaining_time = self.hypothesis_timer.get_remaining_time()
+
+            print(f"📊 Scores: Accuracy={accuracy}, Novelty={novelty}, Relevancy={relevancy}")
+            print(f"⚖️  Automated Verdict: {verdict}")
+            print(f"⏱️  Time remaining: {remaining_time:.1f}s")
+
+            # Record hypothesis
+            record = {
+                'HypothesisNumber': hyp_idx+1,
+                'Iteration': 0,
+                'Status': verdict,
+                'Hypothesis': hypothesis,
+                'Novelty': novelty,
+                'Accuracy': accuracy,
+                'Critique': critique_result.get('critique', ''),
+                'TimeLeft': int(remaining_time),
+                '': '',
+                'Verifier Novelty Score (0-100)': '',
+                'Verifier Accuracy Score (0-100)': '',
+                'Verifier Verdict (accept, refuse)': ''
+            }
+            self.hypothesis_records.append(record)
+
+            # Append to Excel
+            try:
+                df = pd.DataFrame([record])
+                with pd.ExcelWriter(filename, mode='a', engine='openpyxl', if_sheet_exists='overlay') as writer:
+                    df.to_excel(writer, index=False, header=False, startrow=writer.sheets['Sheet1'].max_row)
+            except Exception as e:
+                print(f"❌ Error appending to Excel: {e}")
+
+            # Check if accepted
+            if verdict == 'ACCEPTED':
+                print(f"✅ ACCEPTED! ({hyp_idx+1}/{n})")
+            else:
+                print(f"❌ REJECTED (below thresholds)")
+
+        # Final summary
+        end_time = time.time()
+        total_time = end_time - start_time
+        print(f"\n" + "=" * 80)
+        print(f"🏁 HYPOTHESIS GENERATION COMPLETE")
+        print(f"=" * 80)
+        print(f"Total hypotheses generated: {n}")
+        print(f"Total records: {len(self.hypothesis_records)}")
+        print(f"Total time: {total_time:.1f}s")
+        print(f"Average time per hypothesis: {total_time/n:.1f}s")
+
+        # Log performance
+        self.log_performance("hypothesis_generation_complete", total_time, {
+            "n_hypotheses": n,
+            "total_records": len(self.hypothesis_records),
+            "avg_time_per_hypothesis": total_time/n
+        })
+
+        print(f"✅ Results saved to: {filename}")
+        print(f"📁 File location: {os.path.dirname(os.path.abspath(filename))}")
+        
+        # Create comprehensive export with popup notification
+        print(f"\n📦 Creating comprehensive export...")
+        comprehensive_export_path = self.create_comprehensive_export()
+        if comprehensive_export_path:
+            print(f"📋 Comprehensive results exported to: {comprehensive_export_path}")
+        else:
+            print(f"⚠️  Comprehensive export failed, but Excel export is complete")
+
+        return self.hypothesis_records
+
+    def is_lab_authored_paper(self, metadata):
+        """Check if a paper is authored by the lab PI or lab members."""
+        from src.ai.hypothesis_tools import get_lab_config
+
+        config = get_lab_config()
+        lab_name = config.get("lab_name", "Dr. Xiaojing Ma")
+
+        # Get author information from metadata
+        authors = metadata.get('author', metadata.get('authors', '')).lower()
+        if not authors or authors == 'unknown authors':
+            # If no authors found in metadata, return False
+            return False
+
+        # Clean author string - remove "et al" and other common patterns
+        authors_clean = re.sub(r'\bet\s+al\.?\b', '', authors)  # Remove "et al" or "et al."
+        authors_clean = re.sub(r'\band\s+others\b', '', authors_clean)  # Remove "and others"
+        authors_clean = re.sub(r'\s*&\s*others\b', '', authors_clean)  # Remove "& others" (with optional space)
+        authors_clean = re.sub(r'\s+', ' ', authors_clean).strip()  # Normalize whitespace
+        authors_clean = re.sub(r'[,\s\.]+$', '', authors_clean)  # Remove trailing commas/spaces/periods
+
+        # Check for lab PI name variations - more comprehensive matching
+        pi_name_variations = [
+            'xiaojing ma',
+            'xiaojing',
+            'ma xiaojing',
+            'ma, xiaojing',
+            'ma x',
+            'x ma'
+        ]
+
+        # Check if any PI name variation is in the authors
+        for pi_variation in pi_name_variations:
+            if pi_variation in authors_clean:
+                return True
+
+        # Check for lab member names (if configured)
+        lab_members = config.get('lab_members', [])
+        if lab_members:
+            for member in lab_members:
+                member_lower = member.lower()
+                if member_lower in authors_clean:
+                    return True
+
+        return False
+
+    def retrieve_relevant_chunks_with_lab_papers(self, query, top_k=1500, lab_paper_ratio=None, preferred_authors=None):
+        """
+        Retrieve relevant chunks using the sophisticated lab paper search algorithm.
+        This method now implements author prioritization, impact factor weighting, 
+        and preprint status detection for enhanced lab paper identification.
+        """
+        if not self.use_chromadb or not self.chroma_manager:
+            print("❌ ChromaDB not available. Cannot perform sophisticated lab paper search.")
+            return self.retrieve_relevant_chunks(query, top_k, lab_paper_ratio)
+
+        print(f"🔍 Sophisticated lab paper search for: {query}")
+        print(f"📊 Target chunks: {top_k}, Lab paper ratio: {lab_paper_ratio}")
+
+        # Get all results from ChromaDB
+        try:
+            results = self.chroma_manager.search(
+                query=query,
+                n_results=top_k * 3,  # Get more results to allow for filtering
+                filter_dict=None
+            )
+        except Exception as e:
+            print(f"❌ Error searching ChromaDB: {e}")
+            return self.retrieve_relevant_chunks(query, top_k, lab_paper_ratio)
+
+        if not results or not results.get('documents'):
+            print("❌ No results found in ChromaDB")
+            return []
+
+        # Process results and apply sophisticated filtering
+        processed_results = []
+        lab_papers = []
+        non_lab_papers = []
+
+        for i, (doc, metadata, distance) in enumerate(zip(
+            results['documents'], 
+            results['metadatas'], 
+            results['distances']
+        )):
+            # Add preprint metadata
+            metadata = self.add_preprint_metadata(metadata)
+            
+            # Detect if this is a lab-authored paper
+            is_lab_paper = self.is_lab_authored_paper(metadata)
+            
+            # Check if it's a preferred author paper
+            is_preferred_author = self._is_preferred_author_paper(metadata, preferred_authors) if preferred_authors else False
+            
+            result_item = {
+                'document': doc,
+                'metadata': metadata,
+                'distance': distance,
+                'is_lab_paper': is_lab_paper,
+                'is_preferred_author': is_preferred_author,
+                'impact_factor': self._get_journal_impact_factor(metadata.get('journal', '')),
+                'is_preprint': metadata.get('is_preprint', False)
+            }
+            
+            if is_lab_paper:
+                lab_papers.append(result_item)
+            else:
+                non_lab_papers.append(result_item)
+            
+            processed_results.append(result_item)
+
+        print(f"📊 Found {len(lab_papers)} lab papers and {len(non_lab_papers)} non-lab papers")
+
+        # Apply sophisticated selection strategy
+        selected_results = self._apply_sophisticated_selection_strategy(
+            lab_papers, non_lab_papers, top_k, lab_paper_ratio, preferred_authors
+        )
+
+        print(f"✅ Selected {len(selected_results)} chunks using sophisticated lab paper algorithm")
+        
+        return selected_results
+
+    def configure_lab_paper_ratio(self, ratio=None):
+        """Configure the ratio of lab-authored papers to include in searches."""
+        if ratio is None:
+            print("Current lab paper ratio configuration:")
+            print(f"  Lab paper ratio: {getattr(self, 'lab_paper_ratio', 'Not set (default: 0.2)')}")
+            print(f"  Preferred authors: {getattr(self, 'preferred_authors', 'Not set')}")
+            print(f"  Randomization strategy: {getattr(self, 'randomization_strategy', 'enhanced')}")
+            return
+        
+        if not isinstance(ratio, (int, float)) or ratio < 0 or ratio > 1:
+            print("❌ Lab paper ratio must be a number between 0 and 1")
+            return
+        
+        self.lab_paper_ratio = ratio
+        print(f"✅ Lab paper ratio set to: {ratio}")
+        
+        # Provide guidance on ratio selection
+        if ratio == 0:
+            print("📝 Note: Lab papers will be excluded from searches")
+        elif ratio <= 0.1:
+            print("📝 Note: Very low lab paper inclusion - mostly external papers")
+        elif ratio <= 0.3:
+            print("📝 Note: Moderate lab paper inclusion - balanced approach")
+        elif ratio <= 0.5:
+            print("📝 Note: High lab paper inclusion - lab-focused approach")
+        else:
+            print("📝 Note: Very high lab paper inclusion - primarily lab papers")
+
+    def generate_hypotheses_with_per_hypothesis_timer(self, n=5, max_rounds=10, filename=None):
+        """
+        Generate n hypotheses with optimized timer (1-minute timeout) and performance monitoring.
+        After each iteration, print the result, time left, scores, and hypothesis text.
+        Save every iteration in self.hypothesis_records and append to Excel after each iteration.
+        Adds empty verifier columns separated by an empty column.
+        """
+        import pandas as pd
+        from openpyxl import load_workbook
+        from datetime import datetime
+        if not self.current_package["chunks"]:
+            print("❌ Package is empty. Add some chunks first.")
+            return
+        if not self.hypothesis_generator or not self.hypothesis_critic:
+            print("❌ Hypothesis tools not initialized. Check if Gemini API key is available.")
+            return
+        novelty_threshold = 4
+        accuracy_threshold = 4
+        relevancy_threshold = 3
+        print(f"\n🧠 Generating {n} hypotheses (1-minute timer per hypothesis with performance monitoring)...")
+        print(f"📦 Using {len(self.current_package['chunks'])} package chunks for critique")
+        print(f"[INFO] Acceptance criteria: Novelty >= {novelty_threshold}, Accuracy >= {accuracy_threshold}, Relevancy >= {relevancy_threshold}")
+        
+        # Start performance monitoring
+        start_time = time.time()
+        self.log_performance("hypothesis_generation_start", 0, {"n_hypotheses": n, "max_rounds": max_rounds})
+        package_chunks = self.current_package["chunks"]
+        self.hypothesis_records = []  # Clear previous records
+        # Prepare Excel file
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # Ensure hypothesis_export directory exists
+            export_dir = "hypothesis_export"
+            os.makedirs(export_dir, exist_ok=True)
+            filename = os.path.join(export_dir, f"hypothesis_export_{timestamp}.xlsx")
+        # Write header row at the start, with empty separator and verifier columns
+        columns = [
+            'HypothesisNumber', 'Iteration', 'Status', 'Hypothesis', 'Novelty', 'Accuracy', 'Critique', 'TimeLeft',
+            '',  # Empty separator column
+            'Verifier Novelty Score (0-100)', 'Verifier Accuracy Score (0-100)', 'Verifier Verdict (accept, refuse)'
+        ]
+        pd.DataFrame(columns=columns).to_excel(filename, index=False)
+        for hyp_idx in range(n):
+            print(f"\nGenerating hypothesis {hyp_idx+1}/{n}\n")
+
+            # ALWAYS select new chunks for EVERY hypothesis to ensure diversity
+            if self.use_chromadb and self.chroma_manager and self.initial_add_quantity:
+                print(f"🔄 Selecting new chunks for hypothesis {hyp_idx+1}...")
+                randomization_strategy = getattr(self, 'randomization_strategy', 'enhanced')
+                dynamic_chunks = self.select_dynamic_chunks_for_generation("package query", randomization_strategy=randomization_strategy)
+                if dynamic_chunks:
+                    context_texts = dynamic_chunks
+                    print(f"📚 Using {len(context_texts)} dynamically selected chunks for generation")
+                else:
+                    print(f"⚠️  Failed to select dynamic chunks, using original chunks")
+                    context_texts = [chunk for chunk in package_chunks]
+            else:
+                print(f"📚 Using original chunks for generation (no dynamic selection available)")
+                context_texts = [chunk for chunk in package_chunks]
+
+            self.hypothesis_timer.start()
+            time_left = self.hypothesis_timer.get_remaining_time()
+            
+            # Add timeout protection for hypothesis generation
+            try:
+                hypothesis_list = self.hypothesis_generator.generate(context_texts, n=1)
+                if not hypothesis_list:
+                    print("❌ Failed to generate hypothesis. Skipping...")
+                    continue
+            except Exception as e:
+                logger.error(f"❌ Error generating hypothesis: {e}")
+                print(f"❌ Error generating hypothesis: {e}")
+                continue
+                
+            hypothesis = hypothesis_list[0]
+            
+            # Validate hypothesis format before proceeding
+            from src.ai.hypothesis_tools import validate_hypothesis_format
+            is_valid_format, format_reason = validate_hypothesis_format(hypothesis)
+            if not is_valid_format:
+                print(f"❌ Hypothesis rejected due to format: {format_reason}")
+                print(f"⏭️  Skipping critique for format-rejected hypothesis")
+                # Record format rejection without critique
                 format_rejected_record = {
                     'HypothesisNumber': hyp_idx+1,
                     'Iteration': 0,
@@ -3398,13 +4821,13 @@ class EnhancedRAGQuery:
             iteration = 0
             while not accepted and not self.hypothesis_timer.check_expired() and iteration < max_rounds:
                 iteration += 1
-                critique_result = self.hypothesis_critic.critique(hypothesis, context_texts, prompt=query, lab_goals=get_lab_goals())
+                critique_result = self.hypothesis_critic.critique(hypothesis, context_texts, prompt=query, lab_goals=get_lab_goals(), meta_hypothesis=query)
                 novelty = critique_result.get('novelty', 0)
                 accuracy = critique_result.get('accuracy', 0)
                 relevancy = critique_result.get('relevancy', 0)
                 time_left = self.hypothesis_timer.get_remaining_time()
-                verdict = self.automated_verdict(accuracy, novelty, relevancy, accuracy_threshold=80, novelty_threshold=85, relevancy_threshold=50)
-                print(f"Iteration {iteration}: {verdict} | Novelty: {novelty}/85 | Accuracy: {accuracy}/80 | Relevancy: {relevancy}/50 | Time left: {int(time_left)}s")
+                verdict = self.automated_verdict(accuracy, novelty, relevancy, accuracy_threshold=4, novelty_threshold=4, relevancy_threshold=3)
+                print(f"Iteration {iteration}: {verdict} | Novelty: {novelty}/4 | Accuracy: {accuracy}/4 | Relevancy: {relevancy}/3 | Time left: {int(time_left)}s")
                 print(f"Hypothesis: {hypothesis}")
                 # Save this iteration to records
                 record = {
@@ -3435,12 +4858,12 @@ class EnhancedRAGQuery:
                     break
                 else:
                     # Print specific rejection reason
-                    if accuracy < 80:
-                        print(f"❌ Hypothesis rejected: Low accuracy score ({accuracy}/80)")
-                    elif novelty < 85:
-                        print(f"❌ Hypothesis rejected: Low novelty score ({novelty}/85)")
-                    elif relevancy < 50:
-                        print(f"❌ Hypothesis rejected: Low relevancy score ({relevancy}/50)")
+                    if accuracy < 4:
+                        print(f"❌ Hypothesis rejected: Low accuracy score ({accuracy}/4)")
+                    elif novelty < 4:
+                        print(f"❌ Hypothesis rejected: Low novelty score ({novelty}/4)")
+                    elif relevancy < 3:
+                        print(f"❌ Hypothesis rejected: Low relevancy score ({relevancy}/3)")
                     else:
                         print(f"❌ Hypothesis rejected: Unknown reason (verdict: {verdict})")
                 if self.hypothesis_timer.check_expired():
@@ -3456,7 +4879,7 @@ class EnhancedRAGQuery:
 
     def is_lab_authored_paper(self, metadata):
         """Check if a paper is authored by the lab PI or lab members."""
-        from hypothesis_tools import get_lab_config
+        from src.ai.hypothesis_tools import get_lab_config
 
         config = get_lab_config()
         lab_name = config.get("lab_name", "Dr. Xiaojing Ma")
@@ -3750,9 +5173,11 @@ class EnhancedRAGQuery:
         
         # Step 1: Broad search to get all relevant papers
         print(f"🔍 Performing broad search for relevant papers...")
+        # Limit search to reasonable number to avoid hanging
+        max_search_results = min(top_k * 2, 2000)  # Further reduced to top_k * 2, max 2000 for better performance
         broad_search_results = self.chroma_manager.search_similar(
             query_embedding=query_embedding,
-            n_results=top_k * 5  # Search broadly to find all relevant papers
+            n_results=max_search_results
         )
 
         if not broad_search_results:
@@ -3761,6 +5186,7 @@ class EnhancedRAGQuery:
 
         # Step 2: Categorize papers and extract metadata
         print(f"📋 Categorizing papers and extracting metadata...")
+        print(f"📊 Processing {len(broad_search_results)} papers...")
         lab_papers = []
         preferred_author_papers = []
         other_papers = []
@@ -3769,7 +5195,22 @@ class EnhancedRAGQuery:
         all_citations = []
         journal_impact_factors = {}
         
-        for result in broad_search_results:
+        # Add progress tracking
+        total_papers = len(broad_search_results)
+        processed_count = 0
+        start_time = time.time()
+        
+        for i, result in enumerate(broad_search_results):
+            processed_count += 1
+            # Show progress every 100 papers
+            if processed_count % 100 == 0 or processed_count == total_papers:
+                elapsed_time = time.time() - start_time
+                print(f"📊 Progress: {processed_count}/{total_papers} papers processed ({processed_count/total_papers*100:.1f}%) - {elapsed_time:.1f}s elapsed")
+            
+            # Safety check: if processing takes too long, break early
+            if time.time() - start_time > 60:  # 60 second timeout
+                print(f"⚠️ Processing timeout reached after 60 seconds. Processed {processed_count}/{total_papers} papers.")
+                break
             metadata = result.get('metadata', {})
             
             # Extract citation count for analysis
@@ -4128,6 +5569,189 @@ class EnhancedRAGQuery:
         # Return the selected papers
         return selected_papers
 
+    def retrieve_relevant_chunks_with_lab_papers_deprioritized(self, query, top_k=1500, lab_paper_ratio=None, preferred_authors=None):
+        """
+        Retrieve relevant chunks with deprioritization of previously used papers.
+        This is a modified version of sophisticated_lab_paper_search that applies deprioritization.
+        """
+        if not self.use_chromadb or not self.chroma_manager:
+            print("❌ ChromaDB not available.")
+            return []
+
+        # Check if ChromaDB has data
+        if not self.is_chromadb_ready():
+            print("❌ ChromaDB is empty. Please load data first using the master processor (option 4).")
+            return []
+
+        # Get query embedding
+        query_embedding = self.get_google_embedding(query)
+        if not query_embedding:
+            print("❌ Failed to get query embedding.")
+            return []
+
+        print(f"🔬 Starting sophisticated lab paper search with deprioritization...")
+        print(f"📊 Target: {top_k} total chunks")
+        print(f"🎯 Deprioritization factor: {self.deprioritization_factor * 100}% reduction per use")
+        
+        # Use configured preferred authors if none provided
+        if preferred_authors is None:
+            preferred_authors = getattr(self, 'preferred_authors', [])
+        
+        if preferred_authors:
+            print(f"👥 Using preferred authors: {', '.join(preferred_authors)}")
+        
+        # Step 1: Broad search to get all relevant papers
+        print(f"🔍 Performing broad search for relevant papers...")
+        broad_search_results = self.chroma_manager.search_similar(
+            query_embedding=query_embedding,
+            n_results=top_k * 5  # Search broadly to find all relevant papers
+        )
+
+        if not broad_search_results:
+            print("❌ No papers found in ChromaDB.")
+            return []
+
+        # Step 2: Apply deprioritization to all results
+        print(f"📊 Applying deprioritization to {len(broad_search_results)} papers...")
+        deprioritized_results = []
+        
+        for result in broad_search_results:
+            metadata = result.get('metadata', {})
+            paper_id = self._get_paper_identifier(metadata)
+            
+            # Calculate deprioritization factor
+            usage_count = self.paper_usage_count.get(paper_id, 0)
+            deprioritization_multiplier = (1 - self.deprioritization_factor) ** usage_count
+            
+            # Apply deprioritization to similarity score
+            original_similarity = result.get('similarity', 1.0)
+            adjusted_similarity = original_similarity * deprioritization_multiplier
+            
+            # Create new result with deprioritization info
+            deprioritized_result = result.copy()
+            deprioritized_result.update({
+                'adjusted_similarity': adjusted_similarity,
+                'usage_count': usage_count,
+                'deprioritization_multiplier': deprioritization_multiplier,
+                'paper_id': paper_id
+            })
+            
+            deprioritized_results.append(deprioritized_result)
+
+        # Step 3: Re-sort by adjusted similarity
+        deprioritized_results.sort(key=lambda x: x['adjusted_similarity'], reverse=True)
+        
+        # Step 4: Categorize papers and extract metadata (same as original method)
+        print(f"📋 Categorizing papers and extracting metadata...")
+        lab_papers = []
+        preferred_author_papers = []
+        other_papers = []
+        
+        # Track citation statistics for analysis
+        all_citations = []
+        journal_impact_factors = {}
+        
+        for result in deprioritized_results:
+            metadata = result.get('metadata', {})
+            
+            # Extract citation count for analysis
+            citation_count = metadata.get('citation_count', 'not found')
+            if citation_count != 'not found':
+                try:
+                    citations = int(citation_count)
+                    all_citations.append(citations)
+                except (ValueError, TypeError):
+                    pass
+            
+            # Track journal for impact factor analysis
+            journal = metadata.get('journal', 'Unknown journal')
+            if journal not in journal_impact_factors:
+                journal_impact_factors[journal] = []
+            if citation_count != 'not found':
+                try:
+                    journal_impact_factors[journal].append(int(citation_count))
+                except (ValueError, TypeError):
+                    pass
+            
+            # Categorize papers
+            if self.is_lab_authored_paper(metadata):
+                lab_papers.append(result)
+            elif preferred_authors and self._is_preferred_author_paper(metadata, preferred_authors):
+                preferred_author_papers.append(result)
+            else:
+                other_papers.append(result)
+
+        print(f"📊 Found {len(lab_papers)} lab papers, {len(preferred_author_papers)} preferred author papers, {len(other_papers)} other papers")
+
+        # Step 5: Calculate statistics for prioritization (same as original)
+        print(f"📈 Calculating citation and journal statistics...")
+        
+        # Calculate average citation count
+        avg_citations = np.mean(all_citations) if all_citations else 0
+        median_citations = np.median(all_citations) if all_citations else 0
+        
+        # Calculate journal impact factors (average citations per journal)
+        journal_impact_scores = {}
+        for journal, citations in journal_impact_factors.items():
+            if citations:
+                journal_impact_scores[journal] = np.mean(citations)
+        
+        print(f"📊 Citation statistics: avg={avg_citations:.1f}, median={median_citations:.1f}")
+        print(f"📊 Journal impact scores calculated for {len(journal_impact_scores)} journals")
+
+        # Step 6: Select papers with deprioritization applied (same logic as original)
+        selected_papers = []
+        
+        # Determine lab paper ratio
+        if lab_paper_ratio is None:
+            # Auto-determine based on available lab papers
+            total_available = len(lab_papers) + len(preferred_author_papers) + len(other_papers)
+            lab_paper_ratio = min(0.3, len(lab_papers) / total_available) if total_available > 0 else 0.1
+        
+        lab_papers_to_add = int(top_k * lab_paper_ratio)
+        preferred_author_papers_to_add = int(top_k * 0.1)  # 10% for preferred authors
+        other_papers_to_add = top_k - lab_papers_to_add - preferred_author_papers_to_add
+        
+        print(f"📊 Selection targets: {lab_papers_to_add} lab papers, {preferred_author_papers_to_add} preferred author papers, {other_papers_to_add} other papers")
+
+        # Add lab papers first (highest priority)
+        for result in lab_papers[:lab_papers_to_add]:
+            selected_papers.append(result['chunk'])
+            # Track usage
+            paper_id = result['paper_id']
+            self.paper_usage_count[paper_id] = self.paper_usage_count.get(paper_id, 0) + 1
+
+        # Add preferred author papers
+        for result in preferred_author_papers[:preferred_author_papers_to_add]:
+            selected_papers.append(result['chunk'])
+            # Track usage
+            paper_id = result['paper_id']
+            self.paper_usage_count[paper_id] = self.paper_usage_count.get(paper_id, 0) + 1
+
+        # Add other papers
+        for result in other_papers[:other_papers_to_add]:
+            selected_papers.append(result['chunk'])
+            # Track usage
+            paper_id = result['paper_id']
+            self.paper_usage_count[paper_id] = self.paper_usage_count.get(paper_id, 0) + 1
+
+        # Step 7: Report deprioritization statistics
+        used_papers_in_selection = sum(1 for result in deprioritized_results[:top_k] if result['usage_count'] > 0)
+        print(f"📊 Deprioritization results: {used_papers_in_selection}/{top_k} papers previously used")
+        
+        if self.paper_usage_count:
+            total_unique_papers_used = len(self.paper_usage_count)
+            print(f"📊 Total unique papers used across all hypotheses: {total_unique_papers_used}")
+
+        # Validate we have enough papers
+        if len(selected_papers) < top_k:
+            print(f"⚠️  Warning: Only found {len(selected_papers)} papers (requested {top_k})")
+        elif len(selected_papers) > top_k:
+            print(f"📊 Note: Selected {len(selected_papers)} papers (requested {top_k})")
+        
+        # Return the selected papers
+        return selected_papers
+
     def _is_preferred_author_paper(self, metadata, preferred_authors):
         """Check if a paper is authored by preferred authors."""
         if not preferred_authors:
@@ -4279,6 +5903,129 @@ class EnhancedRAGQuery:
                 return impact
                 
         return 1.0  # Default impact factor for unknown journals
+
+    def show_export_completion_popup(self, export_path):
+        """Show a popup notification when hypothesis generation is complete."""
+        try:
+            # Create a root window if it doesn't exist
+            root = tk.Tk()
+            root.withdraw()  # Hide the main window
+            
+            # Show the popup message
+            messagebox.showinfo(
+                "Hypothesis Generation Complete! 🎉",
+                f"Your hypothesis generation has finished successfully!\n\n"
+                f"📁 Results saved to:\n{export_path}\n\n"
+                f"📋 Export includes:\n"
+                f"• metadata.json - Session metadata\n"
+                f"• metahypothesis_data.csv - Meta-hypothesis data\n"
+                f"• hypothesis.csv - Generated hypotheses\n"
+                f"• sources/ - Source chunks and data\n\n"
+                f"Click OK to continue."
+            )
+            
+            # Destroy the root window
+            root.destroy()
+            
+        except Exception as e:
+            print(f"⚠️ Could not show popup notification: {e}")
+            print(f"📁 Results saved to: {export_path}")
+
+    def create_comprehensive_export(self, base_filename=None):
+        """Create a comprehensive export with the required folder structure."""
+        from datetime import datetime
+        import shutil
+        
+        # Create timestamp-based folder name
+        timestamp = datetime.now().strftime("%m%d%Y-%H%M")
+        export_folder_name = f"Hypothesis_Export_{timestamp}"
+        
+        # Create the main export directory
+        export_dir = "hypothesis_export"
+        os.makedirs(export_dir, exist_ok=True)
+        
+        # Create the specific export folder
+        full_export_path = os.path.join(export_dir, export_folder_name)
+        os.makedirs(full_export_path, exist_ok=True)
+        
+        # Create sources subdirectory
+        sources_dir = os.path.join(full_export_path, "sources")
+        os.makedirs(sources_dir, exist_ok=True)
+        
+        try:
+            # 1. Create metadata.json
+            metadata = {
+                "export_timestamp": datetime.now().isoformat(),
+                "total_hypotheses": len(self.hypothesis_records),
+                "export_version": "1.0",
+                "system_info": {
+                    "chromadb_enabled": self.use_chromadb,
+                    "total_chunks_processed": len(self.hypothesis_records) if self.hypothesis_records else 0
+                }
+            }
+            
+            metadata_file = os.path.join(full_export_path, "metadata.json")
+            with open(metadata_file, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, indent=2)
+            
+            # 2. Create hypothesis.csv
+            if self.hypothesis_records:
+                hypothesis_df = pd.DataFrame(self.hypothesis_records)
+                hypothesis_file = os.path.join(full_export_path, "hypothesis.csv")
+                hypothesis_df.to_csv(hypothesis_file, index=False, encoding='utf-8')
+            
+            # 3. Create metahypothesis_data.csv (if we have meta-hypothesis data)
+            # For now, create an empty file - this can be populated by meta-hypothesis generation
+            meta_hypothesis_file = os.path.join(full_export_path, "metahypothesis_data.csv")
+            pd.DataFrame(columns=['MetaHypothesis', 'Generated_Hypotheses', 'Timestamp']).to_csv(
+                meta_hypothesis_file, index=False, encoding='utf-8'
+            )
+            
+            # 4. Export source chunks to sources/ directory
+            if hasattr(self, 'last_context_chunks') and self.last_context_chunks:
+                chunks_file = os.path.join(sources_dir, "chunks.json")
+                chunks_data = {
+                    "total_chunks": len(self.last_context_chunks),
+                    "chunks": []
+                }
+                
+                for i, chunk in enumerate(self.last_context_chunks):
+                    chunk_data = {
+                        "chunk_id": i,
+                        "content": chunk.get("document", "") if isinstance(chunk, dict) else str(chunk),
+                        "metadata": chunk.get("metadata", {}) if isinstance(chunk, dict) else {}
+                    }
+                    chunks_data["chunks"].append(chunk_data)
+                
+                with open(chunks_file, 'w', encoding='utf-8') as f:
+                    json.dump(chunks_data, f, indent=2, ensure_ascii=False)
+            
+            # 5. Create a summary file
+            summary_file = os.path.join(full_export_path, "export_summary.txt")
+            with open(summary_file, 'w', encoding='utf-8') as f:
+                f.write(f"Hypothesis Generation Export Summary\n")
+                f.write(f"=====================================\n\n")
+                f.write(f"Export Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Total Hypotheses: {len(self.hypothesis_records)}\n")
+                f.write(f"Export Location: {full_export_path}\n\n")
+                f.write(f"Files included:\n")
+                f.write(f"- metadata.json: Session metadata\n")
+                f.write(f"- hypothesis.csv: Generated hypotheses with scores\n")
+                f.write(f"- metahypothesis_data.csv: Meta-hypothesis data\n")
+                f.write(f"- sources/chunks.json: Source chunks used\n")
+                f.write(f"- export_summary.txt: This summary file\n")
+            
+            print(f"✅ Comprehensive export created successfully!")
+            print(f"📁 Export location: {full_export_path}")
+            
+            # Show popup notification
+            self.show_export_completion_popup(full_export_path)
+            
+            return full_export_path
+            
+        except Exception as e:
+            print(f"❌ Error creating comprehensive export: {e}")
+            return None
 
 def main():
     """Main function to run the enhanced RAG query system."""
