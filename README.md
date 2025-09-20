@@ -17,6 +17,9 @@ python src/interfaces/gui_main.py
 
 ### **Manual Installation**
 ```bash
+# Create a virtual environment
+python -m venv .venv
+
 # Install dependencies
 pip install -r requirements.txt
 
@@ -141,33 +144,26 @@ mkdir data\vector_db
 mkdir data\backups
 ```
 
-### **Step 4: API Configuration (Optional but Recommended)**
+### **Step 4: API Configuration**
 
-For full functionality, add your Google AI API key:
+A google API and gemini API key is **required**, and an NCBI API key is *reccommended* if you want to scrape from pubmed.
 
 1. **Get API Key**: Visit [Google AI Studio](https://aistudio.google.com/)
 2. **Create keys.json**: In the AI Research Processor folder, create a file called `keys.json`:
 ```json
 {
-  "google_ai_api_key": "your_api_key_here"
+  "ncbi_api_key": "your_api_key_here",
+  "GOOGLE_API_KEY": "your_api_key_here",
+  "GEMINI_API_KEY": "your_api_key_here"
 }
 ```
 
 ### **Step 5: Running the Software**
 
-#### **Launch GUI (Recommended)**
-```bash
-# Launch the graphical interface
-python gui_main.py
+run ```bash run.bat
 ```
-
 #### **Legacy Command Line Interface**
-```bash
-# Activate virtual environment
-.venv\Scripts\activate
-
-# Run the command line interface
-python main.py
+run ```bash run_on_terminal.bat
 ```
 
 ### **Step 6: First-Time Usage with GUI**
@@ -176,10 +172,10 @@ When you first run the GUI:
 
 1. **Start with Tutorial Tab** - Read the comprehensive data pipeline guide
 2. **Check System Status** - Go to Settings → Data Status
-3. **Collect Data** - Use Paper Scraping → Full Scraper (start with option 1)
+3. **Collect Data** - Use Paper Scraping → Full Scraper (start with option 1)- **Note that this can take a while, up to many hours- but it only needs to be done once.**
 4. **Configure Keywords** - Enter your research interests or use defaults
 5. **Load Data** - Go to Vector Database → Load Embeddings
-6. **Generate Hypotheses** - Use Hypothesis Generation → Generate Hypotheses
+6. **Generate Hypotheses** - Use Hypothesis Generation → Generate Hypothesess
 
 ## 📋 GUI Interface Guide
 
@@ -318,7 +314,6 @@ data/
 ## 📈 Performance
 
 ### Optimization Features
-- **Adaptive Processing** - Dynamic resource allocation
 - **Memory Profiling** - Efficient memory usage
 - **Progress Monitoring** - Real-time performance tracking
 - **Error Recovery** - Automatic retry and recovery mechanisms
@@ -356,7 +351,6 @@ data/
 ### Log Files
 - Check `data/logs/` for detailed error information
 - Monitor processing status in real-time through GUI output areas
-- Use debug mode for detailed troubleshooting
 
 ## 🤝 Contributing
 
@@ -392,7 +386,6 @@ For questions, issues, or contributions:
 - Review log files for error details
 - Check the Tutorial tab in the GUI for comprehensive guidance
 - Review the documentation and troubleshooting sections
+- Contact me at marcellino.rau@gmail.com for any questions or info!
 
 ---
-
-**Note**: The GUI interface provides the same functionality as the command-line interface but with improved usability, real-time feedback, and better error handling. The command-line interface (`main.py`) is still available for users who prefer it.

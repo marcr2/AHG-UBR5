@@ -1,23 +1,12 @@
-# Core runtime
-streamlit>=1.32.0
+# Core dependencies used in the codebase
 chromadb>=0.5.4
-google-generativeai>=0.8.0
-scikit-learn
 numpy>=1.24.0
-pandas
+pandas>=1.5.0
 requests>=2.31.0
 tqdm>=4.66.1
+scikit-learn>=1.3.0
+urllib3>=2.0.0
 openpyxl>=3.1.2
-beautifulsoup4>=4.12.2
-lxml>=4.9.3
+paperscraper>=0.2.0
 matplotlib>=3.7.0
-setuptools>=65.0.0
-paperscraper
-
-# API scraping dependencies
-scholarly>=1.7.11
-paperscraper
-
-# Performance monitoring and optimization
-psutil>=5.9.0
-memory-profiler>=0.61.0
+google-generativeai>=0.8.0

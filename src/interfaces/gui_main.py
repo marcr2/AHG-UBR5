@@ -174,7 +174,7 @@ class ScraperProgressWrapper:
             self.update_progress("🔍 Starting PubMed search...")
             
             # Import and run PubMed scraper with progress monitoring
-            from pubmed_scraper_json import search_pubmed_comprehensive
+            from src.scrapers.pubmed_scraper_json import search_pubmed_comprehensive
             
             # Get keywords from GUI
             keywords_str = self.gui.journal_keywords_var.get()
@@ -1606,7 +1606,7 @@ if __name__ == "__main__":
     def load_processing_config(self):
         """Load processing configuration from processing_config.py."""
         try:
-            import processing_config
+            from src.core import processing_config
             
             # Load values from the imported module
             self.max_workers_var.set(str(processing_config.MAX_WORKERS))
@@ -1628,7 +1628,7 @@ if __name__ == "__main__":
     def load_ubr5_scraper_config(self):
         """Load UBR5 scraper configuration from ubr5_scraper_config.py."""
         try:
-            import ubr5_scraper_config
+            from src.scrapers import ubr5_scraper_config
             
             # Load values from the imported module
             self.semantic_base_url_var.set(ubr5_scraper_config.SEMANTIC_SCHOLAR_CONFIG["base_url"])
