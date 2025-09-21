@@ -164,10 +164,14 @@ A google API and gemini API key is **required**, and an NCBI API key is *reccomm
 
 ### **Step 5: Running the Software**
 
-run ```bash run.bat
+run 
+```bash
+run.bat
 ```
 #### **Legacy Command Line Interface**
-run ```bash run_on_terminal.bat
+run 
+```bash
+run_on_terminal.bat
 ```
 
 ### **Step 6: First-Time Usage with GUI**
