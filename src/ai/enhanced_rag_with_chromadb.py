@@ -820,14 +820,21 @@ class EnhancedRAGQuery:
                 else:
                     year = 'Unknown year'
 
-                # Create citation entry
+                # Create citation entry with enhanced metadata
                 citation = {
                     'source_name': source_name,
                     'title': title,
                     'doi': doi,
                     'authors': authors,
                     'journal': journal,
-                    'year': year
+                    'year': year,
+                    'paper_index': metadata.get('paper_index', ''),
+                    'para_idx': metadata.get('para_idx', ''),
+                    'chunk_length': metadata.get('chunk_length', ''),
+                    'citation_count': metadata.get('citation_count', ''),
+                    'impact_factor': metadata.get('impact_factor', ''),
+                    'chunk_content': chunk.get('document', '') if isinstance(chunk, dict) else str(chunk),
+                    'full_metadata': metadata  # Store complete metadata for reference
                 }
 
                 # Add to citations if not already present (based on DOI or title)
@@ -843,7 +850,14 @@ class EnhancedRAGQuery:
                     'doi': 'No DOI',
                     'authors': 'Unknown authors',
                     'journal': 'Unknown journal',
-                    'year': 'Unknown year'
+                    'year': 'Unknown year',
+                    'paper_index': '',
+                    'para_idx': '',
+                    'chunk_length': '',
+                    'citation_count': '',
+                    'impact_factor': '',
+                    'chunk_content': str(chunk),
+                    'full_metadata': {}
                 })
 
         return citations
@@ -863,6 +877,140 @@ class EnhancedRAGQuery:
             formatted_citations.append(formatted)
 
         return "; ".join(formatted_citations)
+
+    def store_citation_chunks_for_hypothesis(self, hypothesis_text, citations, hypothesis_index, export_dir):
+        """Store citation chunks in sources folder and create hypothesis-citation mapping."""
+        import os
+        import json
+        from datetime import datetime
+        
+        # Create hypothesis-specific sources directory
+        hypothesis_sources_dir = os.path.join(export_dir, "sources", f"hypothesis_{hypothesis_index}")
+        os.makedirs(hypothesis_sources_dir, exist_ok=True)
+        
+        # Store individual citation files
+        citation_files = []
+        for i, citation in enumerate(citations):
+            citation_filename = f"citation_{i+1}_{citation.get('doi', 'no_doi').replace('/', '_')}.json"
+            citation_filepath = os.path.join(hypothesis_sources_dir, citation_filename)
+            
+            # Create citation data with chunk content
+            citation_data = {
+                "citation_info": {
+                    "source_name": citation.get('source_name', ''),
+                    "title": citation.get('title', ''),
+                    "doi": citation.get('doi', ''),
+                    "authors": citation.get('authors', ''),
+                    "journal": citation.get('journal', ''),
+                    "year": citation.get('year', ''),
+                    "citation_count": citation.get('citation_count', ''),
+                    "impact_factor": citation.get('impact_factor', ''),
+                    "paper_index": citation.get('paper_index', ''),
+                    "para_idx": citation.get('para_idx', ''),
+                    "chunk_length": citation.get('chunk_length', '')
+                },
+                "chunk_content": citation.get('chunk_content', ''),
+                "full_metadata": citation.get('full_metadata', {}),
+                "hypothesis_association": {
+                    "hypothesis_index": hypothesis_index,
+                    "hypothesis_text": hypothesis_text,
+                    "associated_at": datetime.now().isoformat()
+                }
+            }
+            
+            # Save citation file
+            with open(citation_filepath, 'w', encoding='utf-8') as f:
+                json.dump(citation_data, f, indent=2, ensure_ascii=False)
+            
+            citation_files.append({
+                "filename": citation_filename,
+                "filepath": citation_filepath,
+                "citation_info": citation_data["citation_info"]
+            })
+        
+        # Create hypothesis-citation mapping file
+        mapping_data = {
+            "hypothesis": {
+                "index": hypothesis_index,
+                "text": hypothesis_text,
+                "total_citations": len(citations),
+                "created_at": datetime.now().isoformat()
+            },
+            "citations": citation_files,
+            "citation_cache_keys": [
+                f"{citation.get('source_name', 'unknown')}_{citation.get('paper_index', 'unknown')}"
+                for citation in citations
+            ]
+        }
+        
+        mapping_filepath = os.path.join(hypothesis_sources_dir, "hypothesis_citation_mapping.json")
+        with open(mapping_filepath, 'w', encoding='utf-8') as f:
+            json.dump(mapping_data, f, indent=2, ensure_ascii=False)
+        
+        return mapping_filepath, citation_files
+
+    def _parse_citations_from_text(self, citations_text):
+        """Parse citations from formatted text back to structured format."""
+        if not citations_text or citations_text == 'No citations available':
+            return []
+        
+        citations = []
+        # Split by semicolon to get individual citations
+        citation_parts = citations_text.split('; ')
+        
+        for citation_text in citation_parts:
+            citation_text = citation_text.strip()
+            if not citation_text:
+                continue
+                
+            # Try to parse the formatted citation
+            # Format: "Authors (Year). Title. Journal. DOI: doi"
+            citation = {
+                'source_name': 'Unknown',
+                'title': 'Unknown title',
+                'doi': 'No DOI',
+                'authors': 'Unknown authors',
+                'journal': 'Unknown journal',
+                'year': 'Unknown year',
+                'paper_index': '',
+                'para_idx': '',
+                'chunk_length': '',
+                'citation_count': '',
+                'impact_factor': '',
+                'chunk_content': '',
+                'full_metadata': {}
+            }
+            
+            # Extract DOI if present
+            if 'DOI:' in citation_text:
+                doi_part = citation_text.split('DOI:')[-1].strip()
+                citation['doi'] = doi_part
+            
+            # Extract year (first 4-digit number in parentheses)
+            import re
+            year_match = re.search(r'\((\d{4})\)', citation_text)
+            if year_match:
+                citation['year'] = year_match.group(1)
+            
+            # Extract authors (text before the year)
+            if year_match:
+                authors_part = citation_text[:year_match.start()].strip()
+                citation['authors'] = authors_part
+            
+            # Extract title and journal (text between year and DOI)
+            if year_match and 'DOI:' in citation_text:
+                middle_part = citation_text[year_match.end():citation_text.find('DOI:')].strip()
+                # Split by periods to separate title and journal
+                parts = middle_part.split('.')
+                if len(parts) >= 2:
+                    citation['title'] = parts[0].strip()
+                    citation['journal'] = parts[1].strip()
+                elif len(parts) == 1:
+                    citation['title'] = parts[0].strip()
+            
+            citations.append(citation)
+        
+        return citations
 
     def retrieve_relevant_chunks(self, query, top_k=1500, lab_paper_ratio=None, use_filtering=True):
         """Retrieve the most relevant chunks from all loaded batches using ChromaDB, with lab-authored papers included."""
@@ -1015,7 +1163,7 @@ class EnhancedRAGQuery:
                         continue
 
                     # Add to new chunks and mark as used
-                    new_chunks.append(result['chunk'])
+                    new_chunks.append(result['document'])
                     used_papers_in_this_selection.add(paper_id)
                     source_counts[source_key] += 1
                     source_selected += 1
@@ -1041,7 +1189,7 @@ class EnhancedRAGQuery:
                     metadata = result.get('metadata', {})
                     paper_id = self._get_paper_identifier(metadata)
 
-                    new_chunks.append(result['chunk'])
+                    new_chunks.append(result['document'])
                     used_papers_in_this_selection.add(paper_id)
 
                     # Track source for remaining chunks
@@ -1141,7 +1289,7 @@ class EnhancedRAGQuery:
                     
                 # Store the best chunk for each paper (first one found)
                 if paper_id not in paper_chunks:
-                    paper_chunks[paper_id] = result['chunk']
+                    paper_chunks[paper_id] = result['document']
                     paper_metadata[paper_id] = metadata
 
             print(f"📊 Identified {len(paper_chunks)} unique papers")
@@ -1402,6 +1550,7 @@ class EnhancedRAGQuery:
         """
         Filter and clean context chunks to improve quality for hypothesis generation.
         Removes low-quality chunks and ensures diverse, relevant content.
+        Preserves metadata structure for citation extraction.
         """
         filtered_chunks = []
         
@@ -1425,18 +1574,24 @@ class EnhancedRAGQuery:
             alpha_ratio = sum(c.isalpha() for c in text) / len(text) if text else 0
             if alpha_ratio < 0.6:  # Less than 60% alphabetic characters
                 continue
+            
+            # Create filtered chunk preserving metadata structure
+            filtered_chunk = {
+                "document": text,
+                "metadata": metadata
+            }
                 
             # Prioritize chunks with query-relevant content if keywords provided
             if query_keywords:
                 text_lower = text.lower()
                 relevance_score = sum(1 for keyword in query_keywords if keyword.lower() in text_lower)
                 if relevance_score > 0:
-                    filtered_chunks.insert(0, text)  # Add to beginning for priority
+                    filtered_chunks.insert(0, filtered_chunk)  # Add to beginning for priority
                 else:
-                    filtered_chunks.append(text)
+                    filtered_chunks.append(filtered_chunk)
             else:
                 # General quality filtering without specific keyword prioritization
-                filtered_chunks.append(text)
+                filtered_chunks.append(filtered_chunk)
         
         # Limit to reasonable number of chunks to avoid token limits
         max_chunks = 1000  # Reduced from 1500 to improve quality
@@ -2033,8 +2188,8 @@ class EnhancedRAGQuery:
         return "REJECTED"
 
     def iterative_hypothesis_generation(self, user_prompt, max_rounds=5, n=3):
-        """Run generator-critic feedback loop for each hypothesis until accepted (>=90% accuracy/novelty and verdict ACCEPT)."""
-        novelty_threshold = 4
+        """Run generator-critic feedback loop for each hypothesis until accepted with iterative refinement."""
+        novelty_threshold = 5  # Increased threshold for true novelty
         accuracy_threshold = 4
         relevancy_threshold = 3
         if not self.hypothesis_generator or not self.hypothesis_critic:
@@ -2147,19 +2302,27 @@ class EnhancedRAGQuery:
                             print(f"\033[92mACCEPTED\033[0m: Hypothesis {i+1} (Novelty: {novelty}/{novelty_threshold}, Accuracy: {accuracy}/{accuracy_threshold}, Relevancy: {relevancy}/{relevancy_threshold})")
                             accepted[i] = True
                         else:
-                            print(f"\033[91mREJECTED\033[0m: Hypothesis {i+1} (Novelty: {novelty}/{novelty_threshold}, Accuracy: {accuracy}/{accuracy_threshold}, Relevancy: {relevancy}/{relevancy_threshold}) - Regenerating...")
+                            print(f"\033[91mREJECTED\033[0m: Hypothesis {i+1} (Novelty: {novelty}/{novelty_threshold}, Accuracy: {accuracy}/{accuracy_threshold}, Relevancy: {relevancy}/{relevancy_threshold}) - Refining...")
                             if self.hypothesis_timer.check_expired():
-                                print(f"[iterative_hypothesis_generation] TIMEOUT: Hypothesis {i+1} regeneration timed out.")
+                                print(f"[iterative_hypothesis_generation] TIMEOUT: Hypothesis {i+1} refinement timed out.")
                                 pbar.update(1)
                                 continue
                             try:
                                 # Context chunks are already filtered during retrieval
                                 context_texts = [chunk.get("document", "") if isinstance(chunk, dict) else chunk for chunk in context_chunks]
-                                new_hypothesis = self.hypothesis_generator.generate(context_texts, n=1, meta_hypothesis=user_prompt)
-                                if new_hypothesis:
-                                    hypotheses[i] = new_hypothesis[0]
+                                # Try to refine the hypothesis based on critique feedback
+                                refined_hypothesis = self.hypothesis_generator.refine_hypothesis(hypotheses[i], critique_result, context_texts, user_prompt)
+                                if refined_hypothesis and refined_hypothesis != hypotheses[i]:
+                                    hypotheses[i] = refined_hypothesis
+                                    print(f"[iterative_hypothesis_generation] ✨ Hypothesis {i+1} refined based on critique feedback")
+                                else:
+                                    # Fallback to regeneration if refinement fails
+                                    print(f"[iterative_hypothesis_generation] ⚠️  Refinement failed, regenerating hypothesis {i+1}...")
+                                    new_hypothesis = self.hypothesis_generator.generate(context_texts, n=1, meta_hypothesis=user_prompt)
+                                    if new_hypothesis:
+                                        hypotheses[i] = new_hypothesis[0]
                             except Exception as e:
-                                print(f"[iterative_hypothesis_generation] ERROR: Failed to regenerate hypothesis {i+1}: {e}")
+                                print(f"[iterative_hypothesis_generation] ERROR: Failed to refine/regenerate hypothesis {i+1}: {e}")
                                 continue
                         avg_rating = (novelty + accuracy + relevancy) / 3 if novelty is not None and accuracy is not None and relevancy is not None else 0
                         pbar.set_postfix({
@@ -2488,6 +2651,15 @@ class EnhancedRAGQuery:
             novelty = critique_result.get('novelty', 0)
             accuracy = critique_result.get('accuracy', 0)
             relevancy = critique_result.get('relevancy', 0)
+            
+            # Handle None values by converting to 0
+            if novelty is None:
+                novelty = 0
+            if accuracy is None:
+                accuracy = 0
+            if relevancy is None:
+                relevancy = 0
+                
             # Use the same thresholds as the acceptance logic
             verdict = self.automated_verdict(accuracy, novelty, relevancy, accuracy_threshold, novelty_threshold, relevancy_threshold)
             remaining_time = self.hypothesis_timer.get_remaining_time()
@@ -2943,10 +3115,18 @@ class EnhancedRAGQuery:
                     critique_result = self.hypothesis_critic.critique(hypothesis, context_texts, prompt=meta_hypothesis, lab_goals=get_lab_goals(), meta_hypothesis=meta_hypothesis)
 
                     if critique_result:
-                        novelty = critique_result.get('novelty')
-                        accuracy = critique_result.get('accuracy')
-                        relevancy = critique_result.get('relevancy')
+                        novelty = critique_result.get('novelty', 0)
+                        accuracy = critique_result.get('accuracy', 0)
+                        relevancy = critique_result.get('relevancy', 0)
                         critique = critique_result.get('critique', 'No critique available')
+
+                        # Handle None values by converting to 0
+                        if novelty is None:
+                            novelty = 0
+                        if accuracy is None:
+                            accuracy = 0
+                        if relevancy is None:
+                            relevancy = 0
 
                         # Determine verdict
                         verdict = self.automated_verdict(accuracy, novelty, relevancy)
@@ -3865,6 +4045,15 @@ class EnhancedRAGQuery:
                             novelty = critique_result.get('novelty', 0)
                             accuracy = critique_result.get('accuracy', 0)
                             relevancy = critique_result.get('relevancy', 0)
+                            
+                            # Handle None values by converting to 0
+                            if novelty is None:
+                                novelty = 0
+                            if accuracy is None:
+                                accuracy = 0
+                            if relevancy is None:
+                                relevancy = 0
+                                
                             verdict = self.automated_verdict(accuracy, novelty, relevancy, accuracy_threshold, novelty_threshold, relevancy_threshold)
                             remaining_time = self.hypothesis_timer.get_remaining_time()
                             print(f"   Novelty: {novelty}/{novelty_threshold}, Accuracy: {accuracy}/{accuracy_threshold}, Relevancy: {relevancy}/{relevancy_threshold}, Automated Verdict: {verdict}")
@@ -4223,6 +4412,15 @@ class EnhancedRAGQuery:
                 novelty = critique_result.get('novelty', 0)
                 accuracy = critique_result.get('accuracy', 0)
                 relevancy = critique_result.get('relevancy', 0)
+                
+                # Handle None values by converting to 0
+                if novelty is None:
+                    novelty = 0
+                if accuracy is None:
+                    accuracy = 0
+                if relevancy is None:
+                    relevancy = 0
+                    
                 verdict = self.automated_verdict(accuracy, novelty, relevancy, accuracy_threshold=4, novelty_threshold=4, relevancy_threshold=3)
                 remaining_time = self.hypothesis_timer.get_remaining_time()
 
@@ -4237,16 +4435,20 @@ class EnhancedRAGQuery:
 
                 print(f"📚 Citations: {citation_count} unique sources")
 
-                # Record hypothesis
-                self.hypothesis_records.append({
+                # Record hypothesis with enhanced citation data
+                hypothesis_record = {
                     'Hypothesis': hypothesis,
                     'Accuracy': accuracy,
                     'Novelty': novelty,
                     'Relevancy': relevancy,
                     'Verdict': verdict,
                     'Critique': critique_result.get('critique', ''),
-                    'Citations': formatted_citations
-                })
+                    'Citations': formatted_citations,
+                    'Citation_Count': citation_count,
+                    'Raw_Citations': citations,  # Store structured citation data
+                    'Context_Chunks': context_chunks  # Store context chunks for later processing
+                }
+                self.hypothesis_records.append(hypothesis_record)
 
                 # Check if accepted
                 if verdict == 'ACCEPTED':
@@ -4496,6 +4698,15 @@ class EnhancedRAGQuery:
             novelty = critique_result.get('novelty', 0)
             accuracy = critique_result.get('accuracy', 0)
             relevancy = critique_result.get('relevancy', 0)
+            
+            # Handle None values by converting to 0
+            if novelty is None:
+                novelty = 0
+            if accuracy is None:
+                accuracy = 0
+            if relevancy is None:
+                relevancy = 0
+                
             verdict = self.automated_verdict(accuracy, novelty, relevancy, accuracy_threshold, novelty_threshold, relevancy_threshold)
             remaining_time = self.hypothesis_timer.get_remaining_time()
 
@@ -4825,6 +5036,15 @@ class EnhancedRAGQuery:
                 novelty = critique_result.get('novelty', 0)
                 accuracy = critique_result.get('accuracy', 0)
                 relevancy = critique_result.get('relevancy', 0)
+                
+                # Handle None values by converting to 0
+                if novelty is None:
+                    novelty = 0
+                if accuracy is None:
+                    accuracy = 0
+                if relevancy is None:
+                    relevancy = 0
+                    
                 time_left = self.hypothesis_timer.get_remaining_time()
                 verdict = self.automated_verdict(accuracy, novelty, relevancy, accuracy_threshold=4, novelty_threshold=4, relevancy_threshold=3)
                 print(f"Iteration {iteration}: {verdict} | Novelty: {novelty}/4 | Accuracy: {accuracy}/4 | Relevancy: {relevancy}/3 | Time left: {int(time_left)}s")
@@ -5716,21 +5936,21 @@ class EnhancedRAGQuery:
 
         # Add lab papers first (highest priority)
         for result in lab_papers[:lab_papers_to_add]:
-            selected_papers.append(result['chunk'])
+            selected_papers.append(result['document'])
             # Track usage
             paper_id = result['paper_id']
             self.paper_usage_count[paper_id] = self.paper_usage_count.get(paper_id, 0) + 1
 
         # Add preferred author papers
         for result in preferred_author_papers[:preferred_author_papers_to_add]:
-            selected_papers.append(result['chunk'])
+            selected_papers.append(result['document'])
             # Track usage
             paper_id = result['paper_id']
             self.paper_usage_count[paper_id] = self.paper_usage_count.get(paper_id, 0) + 1
 
         # Add other papers
         for result in other_papers[:other_papers_to_add]:
-            selected_papers.append(result['chunk'])
+            selected_papers.append(result['document'])
             # Track usage
             paper_id = result['paper_id']
             self.paper_usage_count[paper_id] = self.paper_usage_count.get(paper_id, 0) + 1
@@ -5981,7 +6201,7 @@ class EnhancedRAGQuery:
                 meta_hypothesis_file, index=False, encoding='utf-8'
             )
             
-            # 4. Export source chunks to sources/ directory
+            # 4. Export source chunks to sources/ directory with hypothesis associations
             if hasattr(self, 'last_context_chunks') and self.last_context_chunks:
                 chunks_file = os.path.join(sources_dir, "chunks.json")
                 chunks_data = {
@@ -6000,20 +6220,69 @@ class EnhancedRAGQuery:
                 with open(chunks_file, 'w', encoding='utf-8') as f:
                     json.dump(chunks_data, f, indent=2, ensure_ascii=False)
             
-            # 5. Create a summary file
+            # 5. Store citation chunks for each hypothesis
+            hypothesis_citation_mappings = []
+            if self.hypothesis_records:
+                for i, record in enumerate(self.hypothesis_records):
+                    hypothesis_text = record.get('Hypothesis', '')
+                    if hypothesis_text and hypothesis_text != 'Error in attempt':
+                        # Use raw citations if available, otherwise parse from text
+                        citations = record.get('Raw_Citations', [])
+                        if not citations:
+                            # Fallback to parsing from formatted text
+                            citations_text = record.get('Citations', '')
+                            if citations_text and citations_text != 'No citations available':
+                                citations = self._parse_citations_from_text(citations_text)
+                        
+                        if citations:
+                            # Store citation chunks for this hypothesis
+                            mapping_filepath, citation_files = self.store_citation_chunks_for_hypothesis(
+                                hypothesis_text, citations, i, full_export_path
+                            )
+                            hypothesis_citation_mappings.append({
+                                "hypothesis_index": i,
+                                "hypothesis_text": hypothesis_text,
+                                "mapping_filepath": mapping_filepath,
+                                "citation_files": citation_files,
+                                "citation_count": len(citations)
+                            })
+            
+            # 6. Create master citation mapping file
+            if hypothesis_citation_mappings:
+                master_mapping_file = os.path.join(sources_dir, "master_hypothesis_citation_mapping.json")
+                master_mapping_data = {
+                    "total_hypotheses": len(hypothesis_citation_mappings),
+                    "created_at": datetime.now().isoformat(),
+                    "hypothesis_mappings": hypothesis_citation_mappings
+                }
+                with open(master_mapping_file, 'w', encoding='utf-8') as f:
+                    json.dump(master_mapping_data, f, indent=2, ensure_ascii=False)
+            
+            # 7. Create a summary file
             summary_file = os.path.join(full_export_path, "export_summary.txt")
             with open(summary_file, 'w', encoding='utf-8') as f:
                 f.write(f"Hypothesis Generation Export Summary\n")
                 f.write(f"=====================================\n\n")
                 f.write(f"Export Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                 f.write(f"Total Hypotheses: {len(self.hypothesis_records)}\n")
+                f.write(f"Hypotheses with Citations: {len(hypothesis_citation_mappings)}\n")
                 f.write(f"Export Location: {full_export_path}\n\n")
                 f.write(f"Files included:\n")
                 f.write(f"- metadata.json: Session metadata\n")
                 f.write(f"- hypothesis.csv: Generated hypotheses with scores\n")
                 f.write(f"- metahypothesis_data.csv: Meta-hypothesis data\n")
                 f.write(f"- sources/chunks.json: Source chunks used\n")
-                f.write(f"- export_summary.txt: This summary file\n")
+                f.write(f"- sources/master_hypothesis_citation_mapping.json: Master citation mapping\n")
+                f.write(f"- sources/hypothesis_X/: Individual hypothesis citation folders\n")
+                f.write(f"  - citation_N_*.json: Individual citation files with chunk content\n")
+                f.write(f"  - hypothesis_citation_mapping.json: Hypothesis-specific mapping\n")
+                f.write(f"- export_summary.txt: This summary file\n\n")
+                f.write(f"Citation System Features:\n")
+                f.write(f"- Each hypothesis has its own citation folder\n")
+                f.write(f"- Citations include full chunk content and metadata\n")
+                f.write(f"- Citation cache keys are preserved for easy mapping\n")
+                f.write(f"- Structured JSON format for programmatic access\n")
+                f.write(f"- Use 'python scripts/analyze_citations.py' to analyze citation data\n")
             
             print(f"✅ Comprehensive export created successfully!")
             print(f"📁 Export location: {full_export_path}")

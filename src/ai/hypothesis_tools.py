@@ -261,23 +261,89 @@ class HypothesisGenerator:
                 return []
             
             return valid_hypotheses
-            
+        
         except Exception as e:
-            error_str = str(e)
-            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "quota" in error_str.lower():
-                print(f"[HypothesisGenerator.generate] QUOTA EXCEEDED: {error_str[:200]}...")
-                # Extract retry delay from error message if available
-                import re
-                retry_match = re.search(r'Please retry in (\d+\.?\d*)s', error_str)
-                if retry_match:
-                    wait_time = float(retry_match.group(1)) + 2
-                    print(f"[HypothesisGenerator.generate] Waiting {wait_time:.1f}s before retry...")
-                    import time
-                    time.sleep(wait_time)
-            else:
-                print(f"[HypothesisGenerator.generate] ERROR: Failed to generate hypotheses: {e}")
+            print(f"[HypothesisGenerator.generate] ERROR: Failed to generate hypotheses: {e}")
             return []
 
+    def refine_hypothesis(self, original_hypothesis: str, critique_feedback: dict, context_chunks: List[str], user_prompt: str) -> str:
+        """Refine a hypothesis based on critique feedback."""
+        if not self.model:
+            print("[HypothesisGenerator.refine_hypothesis] ERROR: No model available for hypothesis refinement")
+            return original_hypothesis
+        
+        config = get_lab_config()
+        lab_name = config.get("lab_name", "Dr. Xiaojing Ma")
+        institution = config.get("institution", "Weill Cornell Medicine")
+        
+        # Extract text from chunks
+        context_texts = []
+        for chunk in context_chunks:
+            if isinstance(chunk, dict):
+                context_texts.append(chunk.get("document", str(chunk)))
+            else:
+                context_texts.append(str(chunk))
+        context = "\n\n".join(context_texts)
+        
+        # Build refinement prompt
+        refinement_prompt = f"""You are a senior research scientist at {lab_name}'s lab at {institution}.
+
+TASK: Refine the following hypothesis based on the critique feedback to address the identified issues.
+
+ORIGINAL HYPOTHESIS:
+{original_hypothesis}
+
+CRITIQUE FEEDBACK:
+{critique_feedback.get('critique', '')}
+
+SCORES FROM CRITIQUE:
+- Novelty: {critique_feedback.get('novelty', 'N/A')}/5
+- Accuracy: {critique_feedback.get('accuracy', 'N/A')}/5
+- Relevancy: {critique_feedback.get('relevancy', 'N/A')}/5
+
+LITERATURE CONTEXT:
+{context}
+
+INSTRUCTIONS:
+1. Address the specific issues raised in the critique
+2. Improve novelty by focusing on novel applications, mechanisms, or therapeutic approaches
+3. Ensure scientific accuracy and feasibility
+4. Maintain relevance to the research focus: {user_prompt}
+5. Keep the same format: Hypothesis, Experimental Design, Rationale
+
+REQUIRED FORMAT (follow exactly):
+1. Hypothesis: [Refined hypothesis addressing critique issues]
+2. Experimental Design: [Updated experimental approach]
+3. Rationale: [Revised scientific reasoning]
+
+Generate the refined hypothesis now:"""
+        
+        try:
+            # Check rate limit before making API call
+            if hasattr(self, 'rate_limiter') and self.rate_limiter:
+                estimated_tokens = self.rate_limiter.estimate_tokens(refinement_prompt) + 2000
+                self.rate_limiter.wait_if_needed(estimated_tokens)
+            
+            model = self.model.GenerativeModel("gemini-2.5-flash")
+            
+            def make_api_call():
+                return model.generate_content(refinement_prompt)
+            
+            response = self.rate_limiter.execute_with_retry(make_api_call)
+            text = response.text
+            
+            # Parse the refined hypothesis
+            refined_hypotheses = self._parse_hypotheses(text, 1)
+            if refined_hypotheses:
+                return refined_hypotheses[0]
+            else:
+                print("[HypothesisGenerator.refine_hypothesis] ERROR: Failed to parse refined hypothesis")
+                return original_hypothesis
+                
+        except Exception as e:
+            print(f"[HypothesisGenerator.refine_hypothesis] ERROR: Failed to refine hypothesis: {e}")
+            return original_hypothesis
+            
     def _parse_hypotheses(self, text: str, n: int) -> List[str]:
         # First try to parse complete hypotheses with all three sections
         # Look for the pattern: "1. Hypothesis: ... 2. Experimental Design: ... 3. Rationale: ..."
@@ -529,16 +595,16 @@ class HypothesisCritic:
         suggestions_match = re.search(r"Suggestions:\s*(.*?)(?:\nLiterature gaps:|$)", text, re.DOTALL)
         gaps_match = re.search(r"Literature gaps:\s*(.*?)(?:\nNovelty Score:|$)", text, re.DOTALL)
         
-        # Extract scores
-        novelty_match = re.search(r"Novelty Score[:\s]+(\d+)", text)
-        accuracy_match = re.search(r"Accuracy Score[:\s]+(\d+)", text)
-        relevancy_match = re.search(r"Relevancy Score[:\s]+(\d+)", text)
+        # Extract scores using enhanced parsing
+        novelty = self._extract_score(text, ["novelty", "novelty score"])
+        accuracy = self._extract_score(text, ["accuracy", "accuracy score"])
+        relevancy = self._extract_score(text, ["relevancy", "relevancy score", "relevance", "relevance score"])
         
         result = {
             "critique": critique_match.group(1).strip() if critique_match else text,
-            "novelty": int(novelty_match.group(1)) if novelty_match else None,
-            "accuracy": int(accuracy_match.group(1)) if accuracy_match else None,
-            "relevancy": int(relevancy_match.group(1)) if relevancy_match else None
+            "novelty": novelty,
+            "accuracy": accuracy,
+            "relevancy": relevancy
         }
         
         # Add detailed analysis if present
@@ -550,4 +616,60 @@ class HypothesisCritic:
                 "literature_gaps": gaps_match.group(1).strip() if gaps_match else None
             }
         
-        return result 
+        return result
+    
+    def _extract_score(self, text: str, score_labels: list) -> int:
+        """Extract numeric score from text using multiple patterns and labels."""
+        # Try multiple patterns for each score type
+        patterns = []
+        for label in score_labels:
+            patterns.extend([
+                rf"{label}[:\s]+(\d+)",  # "Novelty: 4" or "Novelty 4"
+                rf"{label}[:\s]+(\d+)/\d+",  # "Novelty: 4/5"
+                rf"{label}[:\s]+(\d+)\.\d*",  # "Novelty: 4.0"
+                rf"{label}[:\s]+(\d+)\s*out\s*of\s*\d+",  # "Novelty: 4 out of 5"
+            ])
+        
+        # Try each pattern
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                try:
+                    score = int(match.group(1))
+                    # Ensure score is within valid range (0-5)
+                    if 0 <= score <= 5:
+                        return score
+                except (ValueError, IndexError):
+                    continue
+        
+        # If no numeric score found, try to extract from descriptive text
+        return self._extract_score_from_description(text, score_labels)
+    
+    def _extract_score_from_description(self, text: str, score_labels: list) -> int:
+        """Extract score from descriptive text when numeric scores aren't found."""
+        text_lower = text.lower()
+        
+        # Look for descriptive words near score labels
+        for label in score_labels:
+            # Find text around the label
+            label_pattern = rf"{label}[:\s]*(.*?)(?:\n|$)"
+            match = re.search(label_pattern, text_lower)
+            if match:
+                context = match.group(1)
+                
+                # Map descriptive words to scores
+                if any(word in context for word in ["excellent", "outstanding", "exceptional", "groundbreaking", "revolutionary"]):
+                    return 5
+                elif any(word in context for word in ["very good", "strong", "significant", "high", "substantial"]):
+                    return 4
+                elif any(word in context for word in ["good", "moderate", "adequate", "reasonable", "fair"]):
+                    return 3
+                elif any(word in context for word in ["poor", "weak", "limited", "low", "insufficient"]):
+                    return 2
+                elif any(word in context for word in ["very poor", "very weak", "minimal", "negligible"]):
+                    return 1
+                elif any(word in context for word in ["none", "no", "absent", "lacking"]):
+                    return 0
+        
+        # Default to 3 (moderate) if no clear indication
+        return 3 

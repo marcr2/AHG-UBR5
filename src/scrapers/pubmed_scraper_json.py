@@ -391,6 +391,13 @@ def search_pubmed_comprehensive(search_terms, max_results=5000, date_from="1900"
                 
             except Exception as e:
                 print(f"\n⚠️  Search strategy {i+1} failed: {e}")
+                # Clean up temporary file even on exception
+                if os.path.exists(f"temp_search_{i}.jsonl"):
+                    try:
+                        os.remove(f"temp_search_{i}.jsonl")
+                        print(f"🧹 Cleaned up temp file: temp_search_{i}.jsonl")
+                    except Exception as cleanup_error:
+                        print(f"⚠️  Failed to clean up temp file: {cleanup_error}")
                 continue
             
             # Update tracking variables
@@ -601,6 +608,13 @@ def search_pubmed_direct_api(search_terms, max_results=5000, date_from="1900", d
                 
             except Exception as e:
                 print(f"\n⚠️  Search strategy {i+1} failed: {e}")
+                # Clean up temporary file even on exception
+                if os.path.exists(f"temp_search_{i}.jsonl"):
+                    try:
+                        os.remove(f"temp_search_{i}.jsonl")
+                        print(f"🧹 Cleaned up temp file: temp_search_{i}.jsonl")
+                    except Exception as cleanup_error:
+                        print(f"⚠️  Failed to clean up temp file: {cleanup_error}")
                 continue
             
             pbar.update(1)
@@ -1786,6 +1800,25 @@ def reprocess_existing_citations():
     print(f"✅ Successfully reprocessed citations for {len(processed_papers)} papers")
     return True
 
+def cleanup_temp_files():
+    """Clean up any remaining temp_search_*.jsonl files."""
+    import glob
+    temp_files = glob.glob("temp_search_*.jsonl")
+    cleaned_count = 0
+    
+    for temp_file in temp_files:
+        try:
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
+                cleaned_count += 1
+                print(f"🧹 Cleaned up leftover temp file: {temp_file}")
+        except Exception as e:
+            print(f"⚠️  Failed to clean up {temp_file}: {e}")
+    
+    if cleaned_count > 0:
+        print(f"✅ Cleaned up {cleaned_count} temporary files")
+    return cleaned_count
+
 def main(max_results=None, search_terms=None):
     """
     Main function for PubMed scraping and processing.
@@ -2077,12 +2110,17 @@ def main(max_results=None, search_terms=None):
         else:
             print(f"\n🔧 Citation processing was disabled - all papers have 'pending' citation counts")
             print(f"💡 To enable citation processing, set environment variable: ENABLE_CITATIONS=true")
+        
+        # Final cleanup of any remaining temp files
+        cleanup_temp_files()
             
     except Exception as e:
         print(f"\n❌ Fatal error in main function: {e}")
         print("Stack trace:")
         import traceback
         traceback.print_exc()
+        # Clean up temp files even on fatal error
+        cleanup_temp_files()
         return
 
 if __name__ == "__main__":

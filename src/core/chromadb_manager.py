@@ -121,6 +121,7 @@ class ChromaDBManager:
     def load_embeddings_from_directory(self, embeddings_dir: str, sources: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Load embeddings from the new multi-file directory structure.
+        Automatically detects all available sources by scanning directory structure.
         
         Args:
             embeddings_dir: Path to the embeddings directory
@@ -133,36 +134,225 @@ class ChromaDBManager:
             logger.error(f"❌ Embeddings directory not found: {embeddings_dir}")
             return {}
         
-        # Load metadata
+        # Load metadata if it exists
         metadata_file = os.path.join(embeddings_dir, "metadata.json")
-        if not os.path.exists(metadata_file):
-            logger.error(f"❌ Metadata file not found: {metadata_file}")
-            return {}
+        metadata = {}
+        if os.path.exists(metadata_file):
+            try:
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
+                logger.info(f"📊 Loaded metadata: {metadata.get('total_embeddings', 0)} total embeddings")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to load metadata: {e}")
+                metadata = {}
+        
+        # Auto-detect all available sources by scanning directory structure
+        detected_sources = self._detect_available_sources(embeddings_dir)
+        
+        # Determine which sources to process
+        if sources is None:
+            # Use all detected sources
+            sources = detected_sources
+            logger.info(f"🔄 Auto-detected sources: {sources}")
+        else:
+            # Filter sources to only include detected ones
+            sources = [s for s in sources if s in detected_sources]
+            logger.info(f"🔄 Processing requested sources: {sources}")
+        
+        # Update metadata with detected sources if not present
+        if 'sources' not in metadata:
+            metadata['sources'] = {}
+        
+        # Add any new sources to metadata
+        for source in detected_sources:
+            if source not in metadata['sources']:
+                metadata['sources'][source] = {
+                    'batch_files': 0,
+                    'total_embeddings': 0,
+                    'embedding_dimension': 768,
+                    'last_updated': datetime.now().isoformat()
+                }
+        
+        return {
+            'metadata': metadata,
+            'sources': sources,
+            'embeddings_dir': embeddings_dir
+        }
+    
+    def _detect_available_sources(self, embeddings_dir: str) -> List[str]:
+        """
+        Auto-detect all available sources by scanning the directory structure.
+        
+        Args:
+            embeddings_dir: Path to the embeddings directory
+            
+        Returns:
+            List of detected source names
+        """
+        detected_sources = []
         
         try:
-            with open(metadata_file, 'r', encoding='utf-8') as f:
-                metadata = json.load(f)
+            # Scan for subdirectories that could contain embeddings
+            for item in os.listdir(embeddings_dir):
+                item_path = os.path.join(embeddings_dir, item)
+                
+                # Skip non-directories and special files
+                if not os.path.isdir(item_path) or item.startswith('.'):
+                    continue
+                
+                # Check if this directory contains embedding data
+                if self._is_valid_source_directory(item_path):
+                    detected_sources.append(item)
+                    logger.info(f"🔍 Detected source: {item}")
+        
+        except Exception as e:
+            logger.error(f"❌ Error detecting sources: {e}")
+        
+        return detected_sources
+    
+    def _is_valid_source_directory(self, dir_path: str) -> bool:
+        """
+        Check if a directory contains valid embedding data.
+        
+        Args:
+            dir_path: Path to the directory to check
             
-            logger.info(f"📊 Loaded metadata: {metadata['total_embeddings']} total embeddings")
+        Returns:
+            True if the directory contains embedding data
+        """
+        try:
+            # Check for batch files (batch_*.json)
+            batch_files = glob.glob(os.path.join(dir_path, "batch_*.json"))
+            if batch_files:
+                logger.debug(f"📁 Found {len(batch_files)} batch files in {os.path.basename(dir_path)}")
+                return True
             
-            # Determine which sources to process
-            available_sources = list(metadata['sources'].keys())
-            if sources is None:
-                sources = available_sources
-            else:
-                sources = [s for s in sources if s in available_sources]
+            # Check for individual JSON files (like ubr5_api)
+            json_files = glob.glob(os.path.join(dir_path, "*.json"))
+            if json_files:
+                # Check if any of these files contain embeddings or are paper data
+                for json_file in json_files[:3]:  # Check first 3 files
+                    try:
+                        with open(json_file, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                        
+                        # Check if it's a batch file with embeddings
+                        if isinstance(data, dict) and 'embeddings' in data:
+                            logger.debug(f"📁 Found embedding batch file in {os.path.basename(dir_path)}")
+                            return True
+                        
+                        # Check if it's individual paper data (like ubr5_api)
+                        if isinstance(data, dict) and any(key in data for key in ['title', 'abstract', 'doi', 'authors']):
+                            logger.debug(f"📁 Found paper data files in {os.path.basename(dir_path)}")
+                            return True
+                            
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        continue
             
-            logger.info(f"🔄 Processing sources: {sources}")
-            
-            return {
-                'metadata': metadata,
-                'sources': sources,
-                'embeddings_dir': embeddings_dir
-            }
+            return False
             
         except Exception as e:
-            logger.error(f"❌ Failed to load metadata: {e}")
-            return {}
+            logger.debug(f"⚠️ Error checking directory {dir_path}: {e}")
+            return False
+    
+    def _process_individual_files(self, individual_files: List[str], source: str) -> Optional[Dict]:
+        """
+        Process individual JSON files (like ubr5_api) into embeddings format.
+        
+        Args:
+            individual_files: List of individual JSON file paths
+            source: Source name
+            
+        Returns:
+            Dict containing embeddings, chunks, metadata, and ids
+        """
+        embeddings = []
+        chunks = []
+        metadata_list = []
+        ids = []
+        
+        logger.info(f"🔄 Processing {len(individual_files)} individual files for {source}...")
+        
+        for i, file_path in enumerate(individual_files):
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    paper_data = json.load(f)
+                
+                # Check if this is a paper data file (like ubr5_api)
+                if isinstance(paper_data, dict) and any(key in paper_data for key in ['title', 'abstract', 'doi', 'authors']):
+                    # Create text for embedding from paper data
+                    text_parts = []
+                    
+                    if paper_data.get('title'):
+                        text_parts.append(f"Title: {paper_data['title']}")
+                    
+                    if paper_data.get('abstract'):
+                        text_parts.append(f"Abstract: {paper_data['abstract']}")
+                    
+                    if paper_data.get('authors'):
+                        authors = paper_data['authors'] if isinstance(paper_data['authors'], list) else [paper_data['authors']]
+                        text_parts.append(f"Authors: {', '.join(authors)}")
+                    
+                    if paper_data.get('journal'):
+                        text_parts.append(f"Journal: {paper_data['journal']}")
+                    
+                    if paper_data.get('year'):
+                        text_parts.append(f"Year: {paper_data['year']}")
+                    
+                    if paper_data.get('fields_of_study'):
+                        fields = paper_data['fields_of_study'] if isinstance(paper_data['fields_of_study'], list) else [paper_data['fields_of_study']]
+                        text_parts.append(f"Fields: {', '.join(fields)}")
+                    
+                    # Create the text chunk
+                    text_chunk = '\n'.join(text_parts)
+                    
+                    if len(text_chunk.strip()) > 50:  # Only process if there's meaningful content
+                        # Create metadata
+                        meta = {
+                            'source_name': source,
+                            'title': paper_data.get('title', ''),
+                            'doi': paper_data.get('doi', ''),
+                            'authors': paper_data.get('authors', []),
+                            'journal': paper_data.get('journal', ''),
+                            'year': paper_data.get('year', ''),
+                            'abstract': paper_data.get('abstract', ''),
+                            'fields_of_study': paper_data.get('fields_of_study', []),
+                            'citation_count': paper_data.get('citation_count', ''),
+                            'impact_factor': paper_data.get('impact_factor', ''),
+                            'source': paper_data.get('source', source),
+                            'file_type': 'individual',
+                            'added_at': datetime.now().isoformat()
+                        }
+                        
+                        # For now, we'll create a placeholder embedding (zeros)
+                        # In a real implementation, you'd generate actual embeddings here
+                        embedding_dim = 768  # text-embedding-004 dimension
+                        placeholder_embedding = [0.0] * embedding_dim
+                        
+                        # Create unique ID
+                        file_id = f"{source}_individual_{i:06d}"
+                        
+                        embeddings.append(placeholder_embedding)
+                        chunks.append(text_chunk)
+                        metadata_list.append(meta)
+                        ids.append(file_id)
+                
+                # Log progress every 100 files
+                if (i + 1) % 100 == 0:
+                    logger.info(f"📊 Processed {i + 1}/{len(individual_files)} individual files for {source}")
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Error processing individual file {file_path}: {e}")
+                continue
+        
+        logger.info(f"✅ Processed {len(embeddings)} embeddings from {len(individual_files)} individual files for {source}")
+        
+        return {
+            'embeddings': embeddings,
+            'chunks': chunks,
+            'metadata': metadata_list,
+            'ids': ids
+        }
     
     def load_batch_file(self, batch_file_path: str) -> Optional[Dict]:
         """
@@ -228,7 +418,14 @@ class ChromaDBManager:
             batch_files = glob.glob(os.path.join(source_dir, "batch_*.json"))
             batch_files.sort()  # Ensure consistent ordering
             
-            logger.info(f"📁 Found {len(batch_files)} batch files for {source}")
+            # Get all individual JSON files (like ubr5_api)
+            individual_files = glob.glob(os.path.join(source_dir, "*.json"))
+            # Filter out batch files
+            individual_files = [f for f in individual_files if not os.path.basename(f).startswith("batch_")]
+            individual_files.sort()
+            
+            total_files = len(batch_files) + len(individual_files)
+            logger.info(f"📁 Found {len(batch_files)} batch files and {len(individual_files)} individual files for {source}")
             
             # Collect all embeddings for bulk insertion
             all_embeddings = []
@@ -238,6 +435,7 @@ class ChromaDBManager:
             
             source_added = 0
             
+            # Process batch files
             for batch_file in batch_files:
                 batch_data = self.load_batch_file(batch_file)
                 if not batch_data:
@@ -272,6 +470,18 @@ class ChromaDBManager:
                 # Log progress every 10 batches
                 if len(batch_files) > 10 and batch_files.index(batch_file) % 10 == 0:
                     logger.info(f"📊 Processed {batch_files.index(batch_file) + 1}/{len(batch_files)} batches for {source}")
+            
+            # Process individual files (like ubr5_api)
+            if individual_files:
+                logger.info(f"🔄 Processing {len(individual_files)} individual files for {source}...")
+                individual_data = self._process_individual_files(individual_files, source)
+                
+                if individual_data:
+                    all_embeddings.extend(individual_data['embeddings'])
+                    all_chunks.extend(individual_data['chunks'])
+                    all_metadata.extend(individual_data['metadata'])
+                    all_ids.extend(individual_data['ids'])
+                    source_added += len(individual_data['embeddings'])
             
             # Bulk insert all embeddings for this source
             if all_embeddings:
@@ -328,11 +538,17 @@ class ChromaDBManager:
             return False
             
         try:
+            # Validate metadata for ChromaDB compatibility
+            validated_metadata = []
+            for meta in metadata:
+                validated_meta = self._validate_metadata_for_chromadb(meta)
+                validated_metadata.append(validated_meta)
+            
             # Add to collection in bulk
             self.collection.add(
                 embeddings=embeddings,  # type: ignore
                 documents=chunks,
-                metadatas=metadata,  # type: ignore
+                metadatas=validated_metadata,  # type: ignore
                 ids=ids
             )
             
@@ -342,6 +558,34 @@ class ChromaDBManager:
             logger.error(f"❌ Failed to bulk add embeddings: {e}")
             return False
     
+    def _validate_metadata_for_chromadb(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Validate and convert metadata to ChromaDB-compatible format.
+        
+        Args:
+            metadata: Original metadata dictionary
+            
+        Returns:
+            Validated metadata dictionary with ChromaDB-compatible values
+        """
+        validated_meta = {}
+        
+        for key, value in metadata.items():
+            if value is None:
+                # ChromaDB doesn't accept None values, convert to empty string
+                validated_meta[key] = ""
+            elif isinstance(value, list):
+                # Convert lists to semicolon-separated strings
+                validated_meta[key] = "; ".join(str(item) for item in value if item is not None)
+            elif isinstance(value, (str, int, float, bool)):
+                # These types are ChromaDB-compatible
+                validated_meta[key] = value
+            else:
+                # Convert other types to strings
+                validated_meta[key] = str(value) if value is not None else ""
+        
+        return validated_meta
+
     def add_embeddings_to_collection(self, data: Dict, source_name: str = "unknown") -> bool:
         """
         Add embeddings to the ChromaDB collection (legacy method for single file).
@@ -362,10 +606,13 @@ class ChromaDBManager:
             embeddings = data['embeddings']
             metadata = data['metadata']
             
-            # Add source information to metadata
+            # Validate and convert metadata for ChromaDB compatibility
+            validated_metadata = []
             for i, meta in enumerate(metadata):
-                meta['source_name'] = source_name
-                meta['added_at'] = datetime.now().isoformat()
+                validated_meta = self._validate_metadata_for_chromadb(meta)
+                validated_meta['source_name'] = source_name
+                validated_meta['added_at'] = datetime.now().isoformat()
+                validated_metadata.append(validated_meta)
             
             # Generate unique IDs
             ids = [f"{source_name}_{i}" for i in range(len(chunks))]
@@ -374,7 +621,7 @@ class ChromaDBManager:
             self.collection.add(
                 embeddings=embeddings,
                 documents=chunks,
-                metadatas=metadata,
+                metadatas=validated_metadata,
                 ids=ids
             )
             

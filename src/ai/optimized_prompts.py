@@ -16,7 +16,14 @@ Format: Numbered list 1-5 with brief, specific directions."""
 
 def get_optimized_hypothesis_prompt(context_chunks: list, n: int, lab_name: str, institution: str, meta_hypothesis: str = None) -> str:
     """Enhanced hypothesis generation prompt with quality standards and clear formatting"""
-    context = "\n\n".join(context_chunks)
+    # Extract text from chunks while preserving metadata structure
+    context_texts = []
+    for chunk in context_chunks:
+        if isinstance(chunk, dict):
+            context_texts.append(chunk.get("document", str(chunk)))
+        else:
+            context_texts.append(str(chunk))
+    context = "\n\n".join(context_texts)
     
     # Build the research focus based on meta-hypothesis or default
     if meta_hypothesis:
@@ -50,7 +57,14 @@ Generate exactly 1 hypothesis following the format above. Ensure all three secti
 
 def get_optimized_critique_prompt(hypothesis: str, context_chunks: list, lab_name: str, critique_config: dict = None, meta_hypothesis: str = None) -> str:
     """Enhanced critique prompt with customizable evaluation criteria"""
-    context = "\n\n".join(context_chunks)
+    # Extract text from chunks while preserving metadata structure
+    context_texts = []
+    for chunk in context_chunks:
+        if isinstance(chunk, dict):
+            context_texts.append(chunk.get("document", str(chunk)))
+        else:
+            context_texts.append(str(chunk))
+    context = "\n\n".join(context_texts)
     
     # Default critique configuration
     default_config = {
@@ -108,8 +122,31 @@ Focus Areas:
 {focus_text}
 {detailed_section}
 
-Provide comprehensive evaluation:
+IMPORTANT: Provide your evaluation in EXACTLY this format:
+
 Critique: [Detailed critical analysis covering all criteria]
-Novelty Score: [{default_config['scoring_scale']}]
-Accuracy Score: [{default_config['scoring_scale']}]
-Relevancy Score: [{default_config['scoring_scale']}]"""
+
+Novelty Score: [MUST be a single integer from 0-5, e.g., "Novelty Score: 4"]
+
+Accuracy Score: [MUST be a single integer from 0-5, e.g., "Accuracy Score: 3"]
+
+Relevancy Score: [MUST be a single integer from 0-5, e.g., "Relevancy Score: 5"]
+
+SCORING GUIDELINES:
+- Use ONLY integers 0, 1, 2, 3, 4, or 5
+- Do NOT use fractions, decimals, or descriptive words in the score lines
+- Do NOT use "out of 5" or "/5" format
+- Example of CORRECT format: "Novelty Score: 4"
+- Example of INCORRECT format: "Novelty Score: 4/5" or "Novelty Score: High"
+
+NOVELTY SCORING CRITERIA (BE STRICT):
+- 5: Groundbreaking, completely novel mechanism or approach never described before
+- 4: Significant innovation with clear novelty in application or methodology
+- 3: Moderate novelty with some innovative elements but builds on known mechanisms
+- 2: Limited novelty, mostly incremental improvement on existing knowledge
+- 1: Minimal novelty, largely derivative with minor modifications
+- 0: No novelty, completely derivative or well-established mechanism
+
+IMPORTANT: Distinguish between known biological mechanisms and novel applications. A hypothesis describing a well-known mechanism (even if not previously studied in a specific context) should score 2-3 for novelty, not 4-5.
+
+Provide your evaluation now:"""

@@ -23,7 +23,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('data/logs/ubr5_api_scraping.log')
+        logging.FileHandler('data/logs/semantic_scholar_scraping.log')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -33,16 +33,16 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", message=".*Could not find paper.*")
 
-class UBR5APIScraper:
+class SemanticScholarScraper:
     """
-    Comprehensive UBR5 paper scraper using Semantic Scholar API.
+    Comprehensive paper scraper using Semantic Scholar API.
     Collects the same data and metadata as xrvix and PubMed scrapers.
     Note: Google Scholar removed due to CAPTCHA/rate limiting issues.
     """
     
     def __init__(self, api_keys: Dict[str, str] = None):
         """
-        Initialize the UBR5 API scraper.
+        Initialize the Semantic Scholar scraper.
         
         Args:
             api_keys: Dictionary containing API keys for different services
@@ -70,8 +70,8 @@ class UBR5APIScraper:
         # Note: Google Scholar removed due to CAPTCHA/rate limiting issues
         # Using Semantic Scholar as primary source (reliable, no CAPTCHA)
         
-        # UBR5 search terms
-        self.ubr5_search_terms = [
+        # Default search terms (can be customized)
+        self.default_search_terms = [
             "UBR5", "ubr5", "Ubr5",
             "ubiquitin protein ligase E3 component n-recognin 5",
             "EDD1", "edd1", "Edd1",
@@ -86,8 +86,13 @@ class UBR5APIScraper:
         os.makedirs(self.embeddings_dir, exist_ok=True)
         
         # Initialize ChromaDB manager
-        self.chromadb_manager = ChromaDBManager()
-        self.chromadb_manager.create_collection()
+        try:
+            self.chromadb_manager = ChromaDBManager()
+            if not self.chromadb_manager.create_collection():
+                logger.warning("⚠️ Failed to create ChromaDB collection, will retry during integration")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize ChromaDB manager: {e}")
+            self.chromadb_manager = None
     
     def _load_keywords_from_config(self):
         """Load keywords from configuration file."""
@@ -663,21 +668,25 @@ class UBR5APIScraper:
         else:
             return "not found"
     
-    def search_ubr5_papers(self, max_papers: int = None) -> List[Dict]:
+    def search_papers(self, max_papers: int = None, search_terms: List[str] = None) -> List[Dict]:
         """
-        Search for UBR5-related papers using specific keywords.
+        Search for papers using specific keywords.
         Fetches as many papers as possible from each source.
         
         Args:
             max_papers: Optional maximum limit (None = no limit)
+            search_terms: Optional list of search terms (uses default if None)
             
         Returns:
             List of unique papers
         """
+        if search_terms is None:
+            search_terms = self.default_search_terms
+            
         if max_papers is None:
-            logger.info("🔍 Starting UBR5 paper search with specific keywords (no limit - fetching all available papers)")
+            logger.info("🔍 Starting paper search with specific keywords (no limit - fetching all available papers)")
         else:
-            logger.info(f"🔍 Starting UBR5 paper search with specific keywords (target: {max_papers} papers)")
+            logger.info(f"🔍 Starting paper search with specific keywords (target: {max_papers} papers)")
         
         all_papers = []
         seen_titles = set()
@@ -977,7 +986,7 @@ class UBR5APIScraper:
             logger.error(f"❌ Error getting Google embedding: {e}")
             return None
     
-    def save_embeddings(self, papers_with_embeddings: List[Dict], source: str = "ubr5_api"):
+    def save_embeddings(self, papers_with_embeddings: List[Dict], source: str = "semantic_scholar"):
         """
         Save embeddings to the data/embeddings/xrvix_embeddings folder.
         
@@ -1043,15 +1052,19 @@ class UBR5APIScraper:
         title = paper.get("title", "untitled")
         doi = paper.get("doi", "")
         
-        # Clean title for filename
+        # Clean title for filename - remove all non-alphanumeric characters except hyphens and underscores
         clean_title = re.sub(r'[^\w\s-]', '', title)
         clean_title = re.sub(r'[-\s]+', '-', clean_title)
         clean_title = clean_title[:100]  # Limit length
         
         if doi:
-            filename = f"{clean_title}_{doi.replace('/', '_')}.json"
+            # Clean DOI for filename - remove all invalid characters
+            clean_doi = re.sub(r'[<>:"/\\|?*]', '_', doi)
+            clean_doi = re.sub(r'[^\w\-_.]', '_', clean_doi)
+            clean_doi = clean_doi[:50]  # Limit DOI length
+            filename = f"{clean_title}_{clean_doi}.json"
         else:
-            filename = f"{clean_title}_{hash(title)}.json"
+            filename = f"{clean_title}_{abs(hash(title))}.json"
         
         return filename
     
@@ -1065,54 +1078,96 @@ class UBR5APIScraper:
         logger.info(f"🔗 Integrating {len(papers_with_embeddings)} embeddings into ChromaDB")
         
         try:
+            # Check if ChromaDB manager is available
+            if self.chromadb_manager is None:
+                logger.error("❌ ChromaDB manager not initialized")
+                return
+            
+            # Ensure ChromaDB collection is properly initialized
+            if not self.chromadb_manager.is_initialized or self.chromadb_manager.collection is None:
+                logger.info("🔧 Initializing ChromaDB collection...")
+                if not self.chromadb_manager.create_collection():
+                    logger.error("❌ Failed to initialize ChromaDB collection")
+                    return
+            
             # Prepare data for ChromaDB with progress bar
             documents = []
             metadatas = []
             ids = []
+            embeddings = []
             
             logger.info("🔧 Preparing metadata for ChromaDB integration...")
             with tqdm(total=len(papers_with_embeddings), desc="Preparing metadata", unit="paper") as metadata_pbar:
                 for i, paper in enumerate(papers_with_embeddings):
+                    # Validate paper has embedding
+                    if not paper.get("embedding"):
+                        logger.warning(f"⚠️ Paper {i} missing embedding, skipping")
+                        continue
+                    
                     # Create document text
                     doc_text = self._create_embedding_text(paper)
                     
-                    # Create metadata
+                    # Create metadata with proper string conversion for ChromaDB
+                    def safe_join_list(data, separator="; "):
+                        """Safely join list data into string for ChromaDB metadata."""
+                        if data is None:
+                            return ""
+                        elif isinstance(data, list):
+                            return separator.join(str(item) for item in data if item is not None)
+                        elif isinstance(data, str):
+                            return data
+                        else:
+                            return str(data) if data is not None else ""
+                    
                     metadata = {
-                        "title": paper.get("title", ""),
-                        "doi": paper.get("doi", ""),
-                        "authors": "; ".join(paper.get("authors", [])),
-                        "journal": paper.get("journal", ""),
-                        "year": str(paper.get("year", "")) if paper.get("year") else "",
-                        "citation_count": paper.get("citation_count", "0"),
-                        "source": paper.get("source", ""),
-                        "is_preprint": str(paper.get("is_preprint", False)),
-                        "publication_date": paper.get("publication_date", ""),
-                        "fields_of_study": "; ".join(paper.get("fields_of_study", [])),
-                        "publication_types": "; ".join(paper.get("publication_types", [])),
-                        "abstract": paper.get("abstract", "")[:1000]  # Limit length
+                        "title": str(paper.get("title", "") or ""),
+                        "doi": str(paper.get("doi", "") or ""),
+                        "authors": safe_join_list(paper.get("authors", [])),
+                        "journal": str(paper.get("journal", "") or ""),
+                        "year": str(paper.get("year", "") or ""),
+                        "citation_count": str(paper.get("citation_count", "0") or "0"),
+                        "source": str(paper.get("source", "") or ""),
+                        "is_preprint": str(paper.get("is_preprint", False) or False),
+                        "publication_date": str(paper.get("publication_date", "") or ""),
+                        "fields_of_study": safe_join_list(paper.get("fields_of_study", [])),
+                        "publication_types": safe_join_list(paper.get("publication_types", [])),
+                        "abstract": str(paper.get("abstract", "") or "")[:1000]  # Limit length
                     }
                     
                     # Create unique ID
-                    paper_id = f"ubr5_api_{i}_{hash(paper.get('title', ''))}"
+                    paper_id = f"ubr5_api_{i}_{abs(hash(paper.get('title', '')))}"
                     
                     documents.append(doc_text)
                     metadatas.append(metadata)
                     ids.append(paper_id)
+                    embeddings.append(paper["embedding"])
                     
                     metadata_pbar.update(1)
                     metadata_pbar.set_postfix({"processed": i+1, "total": len(papers_with_embeddings)})
             
-            # Add to ChromaDB
-            self.chromadb_manager.collection.add(
-                documents=documents,
-                metadatas=metadatas,
+            # Validate we have data to add
+            if not documents or not embeddings:
+                logger.error("❌ No valid documents or embeddings to add to ChromaDB")
+                return
+            
+            # Add to ChromaDB with embeddings using the bulk add method for proper metadata validation
+            success = self.chromadb_manager._bulk_add_to_collection(
+                embeddings=embeddings,
+                chunks=documents,
+                metadata=metadatas,
                 ids=ids
             )
             
-            logger.info(f"✅ Successfully integrated {len(papers_with_embeddings)} embeddings into ChromaDB")
+            if not success:
+                logger.error("❌ Failed to add embeddings to ChromaDB")
+                return
+            
+            logger.info(f"✅ Successfully integrated {len(documents)} embeddings into ChromaDB")
             
         except Exception as e:
             logger.error(f"❌ Error integrating with ChromaDB: {e}")
+            import traceback
+            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
     
     def run_complete_scraping(self, max_papers: int = None):
         """
@@ -1150,7 +1205,7 @@ class UBR5APIScraper:
                 return
             
             # Step 3: Save embeddings
-            self.save_embeddings(papers_with_embeddings, source="ubr5_api")
+            self.save_embeddings(papers_with_embeddings, source="semantic_scholar")
             
             # Step 4: Integrate with ChromaDB
             self.integrate_with_chromadb(papers_with_embeddings)

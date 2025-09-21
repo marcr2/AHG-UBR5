@@ -36,15 +36,15 @@
       "Citation formatting"
     ]
   },
-  "custom_instructions": "Focus on providing actionable feedback with specific recommendations for improvement.",
+  "custom_instructions": "Focus on providing actionable feedback with specific recommendations for improvement. Be particularly strict about novelty scoring - distinguish between well-established biological mechanisms and truly novel applications or approaches. A hypothesis describing a known mechanism (even in a new context) should not receive high novelty scores.",
   "scoring_guidelines": {
     "novelty": {
-      "5": "Groundbreaking, completely novel approach",
-      "4": "Significant innovation with clear novelty",
-      "3": "Moderate novelty with some innovative elements",
-      "2": "Limited novelty, mostly incremental",
-      "1": "Minimal novelty, largely derivative",
-      "0": "No novelty, completely derivative"
+      "5": "Groundbreaking, completely novel mechanism or approach never described before",
+      "4": "Significant innovation with clear novelty in application or methodology",
+      "3": "Moderate novelty with some innovative elements but builds on known mechanisms",
+      "2": "Limited novelty, mostly incremental improvement on existing knowledge",
+      "1": "Minimal novelty, largely derivative with minor modifications",
+      "0": "No novelty, completely derivative or well-established mechanism"
     },
     "accuracy": {
       "5": "Scientifically sound, well-supported by literature",

@@ -41,15 +41,19 @@ AHG-UBR5/
 │   ├── scrapers/                 # Data scraping modules
 │   │   ├── pubmed_scraper_json.py
 │   │   ├── process_xrvix_dumps_json.py
-│   │   ├── ubr5_api_scraper.py
+│   │   ├── semantic_scholar_scraper.py
 │   │   └── xrvix_downloader.py
 │   ├── ai/                       # AI and hypothesis generation
 │   │   ├── enhanced_rag_with_chromadb.py
 │   │   ├── hypothesis_tools.py
 │   │   └── optimized_prompts.py
+│   ├── utils/                    # Utility modules
+│   │   └── citation_mapping_utils.py # Citation analysis tools
 │   └── interfaces/               # User interfaces
 │       ├── main.py               # Terminal interface
 │       └── gui_main.py           # GUI interface
+├── scripts/                      # Command-line tools
+│   └── analyze_citations.py     # Citation analysis script
 ├── config/                       # Configuration files
 │   ├── keys.json                 # API keys
 │   ├── search_keywords_config.json
@@ -257,6 +261,40 @@ When you first run the GUI:
 - Advanced features
 - Getting help resources
 
+### **📊 Citation Analysis Tab**
+
+**Citation Analysis Tools:**
+- Analyze citation patterns across hypotheses
+- Export citation data to CSV for further analysis
+- Track citation cache keys for easy mapping
+- Generate comprehensive citation reports
+
+**Command Line Usage:**
+```bash
+# Analyze latest hypothesis export
+python scripts/analyze_citations.py
+
+# Analyze specific export
+python scripts/analyze_citations.py hypothesis_export/Hypothesis_Export_09202025-2043
+```
+
+**Programmatic Usage:**
+```python
+from src.utils.citation_mapping_utils import CitationMappingUtils
+
+# Load citation data
+utils = CitationMappingUtils("hypothesis_export/Hypothesis_Export_09202025-2043")
+
+# Get citations for hypothesis #5
+citations = utils.get_hypothesis_citations(5)
+
+# Create summary table
+summary_df = utils.create_citation_summary_table()
+
+# Export to CSV
+utils.export_citation_mapping_to_csv()
+```
+
 ## 🏗️ System Architecture
 
 ### Core Components
@@ -267,8 +305,9 @@ When you first run the GUI:
 - **`chromadb_manager.py`** - Vector database management
 - **`pubmed_scraper_json.py`** - PubMed literature scraping
 - **`process_xrvix_dumps_json.py`** - Preprint processing (Biorxiv, Medrxiv)
-- **`ubr5_api_scraper.py`** - Semantic Scholar API scraping
+- **`semantic_scholar_scraper.py`** - Semantic Scholar API scraping
 - **`hypothesis_tools.py`** - AI hypothesis generation tools
+- **`citation_mapping_utils.py`** - Citation analysis and mapping utilities
 
 ### Data Sources
 

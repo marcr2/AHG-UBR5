@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from src.scrapers.pubmed_scraper_json import main as process_pubmed
 from src.scrapers.process_xrvix_dumps_json import main as process_xrvix
-from src.scrapers.ubr5_api_scraper import UBR5APIScraper
+from src.scrapers.semantic_scholar_scraper import SemanticScholarScraper
 from src.core.chromadb_manager import ChromaDBManager
 from src.core.processing_config import print_config_info, get_config, DB_BATCH_SIZE
 
@@ -42,7 +42,7 @@ def setup_debug_logging():
     loggers_to_debug = [
         'pubmed_scraper_json',
         'process_xrvix_dumps_json', 
-        'ubr5_api_scraper',
+        'semantic_scholar_scraper',
         'chromadb_manager',
         'xrvix_downloader',
         'paperscraper',
@@ -461,11 +461,11 @@ def run_full_scraper():
     # Step 3: Process UBR5 (Semantic Scholar)
     print("\n🔬 Step 3/3: Processing UBR5 (Semantic Scholar)...")
     try:
-        ubr5_scraper = UBR5APIScraper()
+        semantic_scraper = SemanticScholarScraper()
         # Set custom keywords for UBR5 scraper
-        ubr5_scraper.search_keywords = [keyword.strip() for keyword in semantic_keywords.split(',')]
+        semantic_scraper.search_keywords = [keyword.strip() for keyword in semantic_keywords.split(',')]
         print(f"   Using keywords: {semantic_keywords}")
-        ubr5_scraper.run_complete_scraping()
+        semantic_scraper.run_complete_scraping()
         print("✅ UBR5 processing completed successfully!")
         success_count += 1
     except Exception as e:
@@ -515,11 +515,11 @@ def run_journal_articles_only():
     # Step 2: Process UBR5 (Semantic Scholar)
     print("\n🔬 Step 2/2: Processing UBR5 (Semantic Scholar)...")
     try:
-        ubr5_scraper = UBR5APIScraper()
+        semantic_scraper = SemanticScholarScraper()
         # Set custom keywords for UBR5 scraper
-        ubr5_scraper.search_keywords = [keyword.strip() for keyword in semantic_keywords.split(',')]
+        semantic_scraper.search_keywords = [keyword.strip() for keyword in semantic_keywords.split(',')]
         print(f"   Using keywords: {semantic_keywords}")
-        ubr5_scraper.run_complete_scraping()
+        semantic_scraper.run_complete_scraping()
         print("✅ UBR5 processing completed successfully!")
         success_count += 1
     except Exception as e:
@@ -645,24 +645,14 @@ def load_embeddings():
                     total_loaded += len(pubmed_data.get('embeddings', []))
                     print(f"✅ Loaded {len(pubmed_data.get('embeddings', []))} PubMed embeddings")
         
-        # Load xrvix embeddings (biorxiv, medrxiv)
+        # Load all embeddings from xrvix directory (auto-detects all sources)
         xrvix_path = "data/embeddings/xrvix_embeddings"
         if os.path.exists(xrvix_path):
-            print("🔄 Loading xrvix embeddings (biorxiv, medrxiv)...")
+            print("🔄 Loading all embeddings from xrvix directory (auto-detecting sources)...")
             if manager.add_embeddings_from_directory(xrvix_path, db_batch_size=DB_BATCH_SIZE):
                 stats = manager.get_collection_stats()
                 total_docs = stats.get('total_documents', 0)
-                print(f"✅ Loaded xrvix embeddings (total documents: {total_docs})")
-                total_loaded = total_docs
-        
-        # Load UBR5 API embeddings
-        ubr5_path = "data/embeddings/xrvix_embeddings/ubr5_api"
-        if os.path.exists(ubr5_path):
-            print("🔄 Loading UBR5 API embeddings...")
-            if manager.add_embeddings_from_directory(ubr5_path, db_batch_size=DB_BATCH_SIZE):
-                stats = manager.get_collection_stats()
-                total_docs = stats.get('total_documents', 0)
-                print(f"✅ Loaded UBR5 API embeddings (total documents: {total_docs})")
+                print(f"✅ Loaded all embeddings (total documents: {total_docs})")
                 total_loaded = total_docs
         
         if total_loaded == 0:

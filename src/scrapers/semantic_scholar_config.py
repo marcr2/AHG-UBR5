@@ -1,10 +1,10 @@
 """
-Configuration file for the UBR5 API scraper.
+Configuration file for the Semantic Scholar scraper.
 Contains all configurable parameters for paper collection and processing.
 """
 
-# --- UBR5 SEARCH CONFIGURATION ---
-UBR5_SEARCH_TERMS = [
+# --- DEFAULT SEARCH CONFIGURATION ---
+DEFAULT_SEARCH_TERMS = [
     # Direct UBR5 searches
     "UBR5",
     "ubr5", 
@@ -114,7 +114,7 @@ PAPER_PROCESSING = {
 # --- STORAGE CONFIGURATION ---
 STORAGE_CONFIG = {
     "embeddings_dir": "xrvix_embeddings",
-    "source_name": "ubr5_api",
+    "source_name": "semantic_scholar",
     "file_format": "json",
     "metadata_file": "metadata.json",
     "max_filename_length": 100,

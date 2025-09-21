@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from src.scrapers.pubmed_scraper_json import main as process_pubmed
 from src.scrapers.process_xrvix_dumps_json import main as process_xrvix
-from src.scrapers.ubr5_api_scraper import UBR5APIScraper
+from src.scrapers.semantic_scholar_scraper import SemanticScholarScraper
 from src.core.chromadb_manager import ChromaDBManager
 from src.core.processing_config import print_config_info, get_config, DB_BATCH_SIZE
 
@@ -220,8 +220,8 @@ class ScraperProgressWrapper:
             self.update_progress("🔍 Starting UBR5 Semantic Scholar search...")
             
             # Create UBR5 scraper
-            ubr5_scraper = UBR5APIScraper()
-            ubr5_scraper.search_keywords = [keyword.strip() for keyword in keywords.split(',')]
+            semantic_scraper = SemanticScholarScraper()
+            semantic_scraper.search_keywords = [keyword.strip() for keyword in keywords.split(',')]
             
             # Set up real-time progress monitoring
             progress_wrapper = RealTimeProgressWrapper(
@@ -236,7 +236,7 @@ class ScraperProgressWrapper:
             
             try:
                 # Run the scraper with real-time progress updates
-                ubr5_scraper.run_complete_scraping()
+                semantic_scraper.run_complete_scraping()
                 
                 self.update_progress("✅ UBR5 Semantic Scholar search completed successfully!")
                 
@@ -2721,14 +2721,14 @@ STEP 5: Analyze Results
                         total_loaded += len(pubmed_data.get('embeddings', []))
                         self.log_message(self.load_output, f"✅ Loaded {len(pubmed_data.get('embeddings', []))} PubMed embeddings")
             
-            # Load xrvix embeddings
+            # Load all embeddings from xrvix directory (auto-detects all sources)
             xrvix_path = "data/embeddings/xrvix_embeddings"
             if os.path.exists(xrvix_path):
-                self.log_message(self.load_output, "🔄 Loading xrvix embeddings (biorxiv, medrxiv)...")
+                self.log_message(self.load_output, "🔄 Loading all embeddings from xrvix directory (auto-detecting sources)...")
                 if manager.add_embeddings_from_directory(xrvix_path, db_batch_size=DB_BATCH_SIZE):
                     stats = manager.get_collection_stats()
                     total_docs = stats.get('total_documents', 0)
-                    self.log_message(self.load_output, f"✅ Loaded xrvix embeddings (total documents: {total_docs})")
+                    self.log_message(self.load_output, f"✅ Loaded all embeddings (total documents: {total_docs})")
                     total_loaded = total_docs
             
             # Load Semantic Scholar API embeddings
