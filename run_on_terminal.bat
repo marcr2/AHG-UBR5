@@ -70,8 +70,8 @@ echo    LAUNCHING AHG-UBR5 RESEARCH PROCESSOR
 echo ============================================================
 echo.
 
-REM Launch the main program
-python src/interfaces/main.py
+REM Launch the GUI program
+python src/interfaces/gui_main.py
 
 REM Check if the program exited with an error
 if errorlevel 1 (
