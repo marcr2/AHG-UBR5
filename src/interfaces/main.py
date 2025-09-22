@@ -22,6 +22,37 @@ from src.scrapers.semantic_scholar_scraper import SemanticScholarScraper
 from src.core.chromadb_manager import ChromaDBManager
 from src.core.processing_config import print_config_info, get_config, DB_BATCH_SIZE
 
+def parse_unified_keywords(keywords_str):
+    """
+    Parse keywords from user input or config file into a unified format.
+    Returns a list of cleaned keywords that both PubMed and Semantic Scholar can use.
+    """
+    if not keywords_str or not keywords_str.strip():
+        # Fall back to config file if no input
+        try:
+            with open("config/search_keywords_config.json", "r", encoding="utf-8") as f:
+                config = json.load(f)
+            keywords_str = config.get("pubmed_keywords", "")
+        except Exception:
+            keywords_str = ""
+    
+    if not keywords_str or not keywords_str.strip():
+        # Final fallback to default keywords
+        return ["UBR5", "ubr-5", "ubr5", "tumor immunology", "protein degradation"]
+    
+    # Parse comma-separated keywords and clean them
+    keywords = [term.strip() for term in keywords_str.split(',') if term.strip()]
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_keywords = []
+    for keyword in keywords:
+        if keyword.lower() not in seen:
+            seen.add(keyword.lower())
+            unique_keywords.append(keyword)
+    
+    return unique_keywords
+
 # Configure comprehensive logging
 def setup_debug_logging():
     """Setup comprehensive debug logging for terminal interface."""
@@ -516,9 +547,10 @@ def run_journal_articles_only():
     print("\n🔬 Step 2/2: Processing UBR5 (Semantic Scholar)...")
     try:
         semantic_scraper = SemanticScholarScraper()
-        # Set custom keywords for UBR5 scraper
-        semantic_scraper.search_keywords = [keyword.strip() for keyword in semantic_keywords.split(',')]
-        print(f"   Using keywords: {semantic_keywords}")
+        # Use unified keyword parsing to ensure consistency with PubMed
+        search_keywords = parse_unified_keywords(semantic_keywords)
+        semantic_scraper.search_keywords = search_keywords
+        print(f"   Using keywords: {', '.join(search_keywords)}")
         semantic_scraper.run_complete_scraping()
         print("✅ UBR5 processing completed successfully!")
         success_count += 1

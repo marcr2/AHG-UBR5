@@ -121,24 +121,28 @@ def search_pubmed_comprehensive(search_terms, max_results=5000, date_from="1900"
     print(f"📋 Cleaned search terms: {', '.join(cleaned_search_terms)}")
     
     # More targeted search strategies to avoid overwhelming PubMed servers
-    ubr5_variants = " OR ".join([f'"{term}"' for term in cleaned_search_terms])
+    all_terms = " OR ".join([f'"{term}"' for term in cleaned_search_terms])
     
-    # Strategy 1: UBR5-specific search (most targeted)
-    ubr5_specific = '("UBR5" OR "ubr-5")[Title/Abstract]'
+    # Strategy 1: Combined search with all terms (most comprehensive)
+    combined_query = f"({all_terms})[Title/Abstract]"
     
     # Strategy 2: Title-only search for precision (fastest)
-    title_query = '("UBR5" OR "ubr-5")[Title]'
+    title_query = f"({all_terms})[Title]"
     
-    # Strategy 3: Combined search with all terms (broader but still controlled)
-    combined_query = f"({ubr5_variants})[Title/Abstract]"
+    # Strategy 3: UBR5-specific search (most targeted for UBR5 variants)
+    ubr5_variants = " OR ".join([f'"{term}"' for term in cleaned_search_terms if 'ubr' in term.lower()])
+    if ubr5_variants:
+        ubr5_specific = f"({ubr5_variants})[Title/Abstract]"
+    else:
+        ubr5_specific = combined_query  # Fallback to combined if no UBR5 variants
     
     # Strategy 4: MeSH terms search (if needed)
-    mesh_query = f"({ubr5_variants})[MeSH Terms]"
+    mesh_query = f"({all_terms})[MeSH Terms]"
     
     search_strategies = [
-        ubr5_specific,       # Most targeted - UBR5 variants only
-        title_query,         # Fastest - title-only search
-        combined_query,      # Broader but controlled
+        combined_query,      # Most comprehensive - all terms in title/abstract
+        title_query,         # Fastest - all terms in title only
+        ubr5_specific,       # Targeted - UBR5 variants only (if any)
         mesh_query           # MeSH terms for comprehensive coverage
     ]
     

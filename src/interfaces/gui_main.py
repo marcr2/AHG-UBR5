@@ -24,6 +24,37 @@ from src.scrapers.semantic_scholar_scraper import SemanticScholarScraper
 from src.core.chromadb_manager import ChromaDBManager
 from src.core.processing_config import print_config_info, get_config, DB_BATCH_SIZE
 
+def parse_unified_keywords(keywords_str):
+    """
+    Parse keywords from GUI input or config file into a unified format.
+    Returns a list of cleaned keywords that both PubMed and Semantic Scholar can use.
+    """
+    if not keywords_str or not keywords_str.strip():
+        # Fall back to config file if no GUI input
+        try:
+            with open("config/search_keywords_config.json", "r", encoding="utf-8") as f:
+                config = json.load(f)
+            keywords_str = config.get("pubmed_keywords", "")
+        except Exception:
+            keywords_str = ""
+    
+    if not keywords_str or not keywords_str.strip():
+        # Final fallback to default keywords
+        return ["UBR5", "ubr-5", "ubr5", "tumor immunology", "protein degradation"]
+    
+    # Parse comma-separated keywords and clean them
+    keywords = [term.strip() for term in keywords_str.split(',') if term.strip()]
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_keywords = []
+    for keyword in keywords:
+        if keyword.lower() not in seen:
+            seen.add(keyword.lower())
+            unique_keywords.append(keyword)
+    
+    return unique_keywords
+
 class ProgressMonitor:
     """Monitor progress from scraper processes."""
     
@@ -176,14 +207,9 @@ class ScraperProgressWrapper:
             # Import and run PubMed scraper with progress monitoring
             from src.scrapers.pubmed_scraper_json import search_pubmed_comprehensive
             
-            # Get keywords from GUI
+            # Get keywords from GUI using unified parsing
             keywords_str = self.gui.journal_keywords_var.get()
-            if keywords_str:
-                # Parse comma-separated keywords
-                search_terms = [term.strip() for term in keywords_str.split(',') if term.strip()]
-            else:
-                # Use default terms if no keywords provided
-                search_terms = ["UBR5", "ubr-5", "ubr5", "tumor immunology", "protein degradation"]
+            search_terms = parse_unified_keywords(keywords_str)
             
             # Set up real-time progress monitoring
             progress_wrapper = RealTimeProgressWrapper(
@@ -221,7 +247,9 @@ class ScraperProgressWrapper:
             
             # Create UBR5 scraper
             semantic_scraper = SemanticScholarScraper()
-            semantic_scraper.search_keywords = [keyword.strip() for keyword in keywords.split(',')]
+            # Use unified keyword parsing to ensure consistency with PubMed
+            search_keywords = parse_unified_keywords(keywords)
+            semantic_scraper.search_keywords = search_keywords
             
             # Set up real-time progress monitoring
             progress_wrapper = RealTimeProgressWrapper(
