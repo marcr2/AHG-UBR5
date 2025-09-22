@@ -10,3 +10,4 @@ openpyxl>=3.1.2
 paperscraper>=0.2.0
 matplotlib>=3.7.0
 google-generativeai>=0.8.0
+setuptools

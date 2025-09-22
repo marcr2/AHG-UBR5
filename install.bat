@@ -54,6 +54,17 @@ if errorlevel 1 (
 )
 
 echo.
+echo Step 6: Create necessary directories...
+if not exist "data" mkdir data
+if not exist "data\logs" mkdir data\logs
+if not exist "data\vector_db" mkdir data\vector_db
+if not exist "data\vector_db\chroma_db" mkdir data\vector_db\chroma_db
+if not exist "data\scraped_papers" mkdir data\scraped_papers
+if not exist "data\processed_papers" mkdir data\processed_papers
+if not exist "data\exports" mkdir data\exports
+echo Directories created successfully!
+
+echo.
 echo ========================================
 echo   INSTALLATION COMPLETED!
 echo ========================================
