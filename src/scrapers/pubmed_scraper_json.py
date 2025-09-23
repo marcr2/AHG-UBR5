@@ -83,15 +83,34 @@ def get_citation_error_summary():
     global citation_error_counter
     return citation_error_counter.copy()
 
-def search_pubmed_comprehensive(search_terms, max_results=5000, date_from="1900", date_to=None):
+def save_papers_to_file(papers, filepath):
     """
-    Optimized PubMed search using efficient strategies to maximize paper discovery.
+    Save papers to a JSONL file.
+    
+    Args:
+        papers: List of paper dictionaries
+        filepath: Path to save the file
+    """
+    import os
+    
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    
+    # Save papers to JSONL format
+    with open(filepath, 'w', encoding='utf-8') as f:
+        for paper in papers:
+            f.write(json.dumps(paper, ensure_ascii=False) + '\n')
+
+def search_pubmed_comprehensive(search_terms, date_from="1900", date_to=None, max_results=None, auto_save_frequency=500):
+    """
+    Comprehensive PubMed search that searches until no more unique papers are found.
     
     Args:
         search_terms: List of search terms
-        max_results: Maximum number of results to retrieve
         date_from: Start date for search (YYYY or YYYY-MM-DD)
         date_to: End date for search (YYYY or YYYY-MM-DD), defaults to current date
+        max_results: Maximum number of results to collect (default: 10000)
+        auto_save_frequency: Save data every N articles (default: 500)
     
     Returns:
         List of paper dictionaries
@@ -99,20 +118,37 @@ def search_pubmed_comprehensive(search_terms, max_results=5000, date_from="1900"
     if date_to is None:
         date_to = datetime.now().strftime("%Y-%m-%d")
     
-    print(f"🔍 Starting optimized PubMed search...")
+    print(f"🔍 Starting comprehensive PubMed search...")
     print(f"   Date range: {date_from} to {date_to}")
-    print(f"   Target results: {max_results}")
+    print(f"   Searching until no more unique papers found for each keyword")
     
     all_papers = []
+    
+    # Set default max_results if not provided
+    if max_results is None:
+        max_results = 10000  # Default to 10,000 papers
+    
+    # Track last auto-save count
+    last_autosave_count = 0
     
     # Ensure all search terms are strings and clean them
     cleaned_search_terms = []
     for term in search_terms:
         if term is not None:
-            # Convert to string and clean
-            term_str = str(term).strip()
-            if term_str and term_str.lower() not in ['nan', 'none', 'null', '']:
-                cleaned_search_terms.append(term_str)
+            # Convert to string and clean - handle various data types
+            try:
+                if isinstance(term, (int, float)):
+                    # Convert numbers to strings
+                    term_str = str(int(term)) if isinstance(term, float) and term.is_integer() else str(term)
+                else:
+                    term_str = str(term).strip()
+                
+                # Additional validation
+                if term_str and term_str.lower() not in ['nan', 'none', 'null', ''] and len(term_str.strip()) > 0:
+                    cleaned_search_terms.append(term_str.strip())
+            except (ValueError, TypeError) as e:
+                print(f"⚠️  Skipping invalid search term '{term}': {e}")
+                continue
     
     if not cleaned_search_terms:
         print("❌ No valid search terms provided!")
@@ -120,33 +156,21 @@ def search_pubmed_comprehensive(search_terms, max_results=5000, date_from="1900"
     
     print(f"📋 Cleaned search terms: {', '.join(cleaned_search_terms)}")
     
-    # More targeted search strategies to avoid overwhelming PubMed servers
-    all_terms = " OR ".join([f'"{term}"' for term in cleaned_search_terms])
+    # Simple approach: search each keyword individually
+    search_strategies = []
+    for term in cleaned_search_terms:
+        # Ensure term is a string and not a float - additional safety check
+        if isinstance(term, (int, float)):
+            term = str(term)
+        elif not isinstance(term, str):
+            term = str(term)
+        
+        # Additional validation to prevent float values from being passed to paperscraper
+        if term and term.strip() and not term.lower() in ['nan', 'none', 'null', '']:
+            # Search each keyword in Title/Abstract
+            search_strategies.append(f'"{term}"[Title/Abstract]')
     
-    # Strategy 1: Combined search with all terms (most comprehensive)
-    combined_query = f"({all_terms})[Title/Abstract]"
-    
-    # Strategy 2: Title-only search for precision (fastest)
-    title_query = f"({all_terms})[Title]"
-    
-    # Strategy 3: UBR5-specific search (most targeted for UBR5 variants)
-    ubr5_variants = " OR ".join([f'"{term}"' for term in cleaned_search_terms if 'ubr' in term.lower()])
-    if ubr5_variants:
-        ubr5_specific = f"({ubr5_variants})[Title/Abstract]"
-    else:
-        ubr5_specific = combined_query  # Fallback to combined if no UBR5 variants
-    
-    # Strategy 4: MeSH terms search (if needed)
-    mesh_query = f"({all_terms})[MeSH Terms]"
-    
-    search_strategies = [
-        combined_query,      # Most comprehensive - all terms in title/abstract
-        title_query,         # Fastest - all terms in title only
-        ubr5_specific,       # Targeted - UBR5 variants only (if any)
-        mesh_query           # MeSH terms for comprehensive coverage
-    ]
-    
-    print(f"📋 Generated {len(search_strategies)} efficient search strategies")
+    print(f"📋 Generated {len(search_strategies)} individual keyword searches")
     
     # Initialize tracking variables
     all_papers = []
@@ -178,6 +202,11 @@ def search_pubmed_comprehensive(search_terms, max_results=5000, date_from="1900"
     # Execute searches with real-time display
     for i, search_query in enumerate(search_strategies):
             try:
+                # Debug: Check search_query type before processing
+                if not isinstance(search_query, str):
+                    print(f"⚠️  Warning: search_query is not a string: {type(search_query)} = {search_query}")
+                    search_query = str(search_query)
+                
                 # Add date filters to the search query
                 date_filter = f" AND ({date_from}[Date - Publication]:{date_to}[Date - Publication])"
                 full_query = search_query + date_filter
@@ -192,7 +221,7 @@ def search_pubmed_comprehensive(search_terms, max_results=5000, date_from="1900"
                     result_queue = queue.Queue()
                     progress_queue = queue.Queue()
                     
-                    def search_worker_with_progress():
+                    def search_worker_with_progress(query):
                         # Retry mechanism with exponential backoff
                         max_retries = 3
                         for attempt in range(max_retries):
@@ -201,8 +230,20 @@ def search_pubmed_comprehensive(search_terms, max_results=5000, date_from="1900"
                                     wait_time = 2 ** attempt  # Exponential backoff: 2, 4 seconds
                                     time.sleep(wait_time)
                                 
-                                # Call paperscraper silently
-                                papers = get_and_dump_pubmed_papers([[full_query]], f"temp_search_{i}.jsonl")
+                                # Call paperscraper silently with additional error handling
+                                try:
+                                    papers = get_and_dump_pubmed_papers([[query]], f"temp_search_{i}.jsonl")
+                                except AttributeError as attr_error:
+                                    if "'float' object has no attribute 'lower'" in str(attr_error):
+                                        print(f"⚠️  Data type error in search strategy {i+1}: {attr_error}")
+                                        print(f"   Search query: {query}")
+                                        print(f"   Query type: {type(query)}")
+                                        # Try to fix by ensuring the query is a proper string
+                                        if not isinstance(query, str):
+                                            query = str(query)
+                                        papers = get_and_dump_pubmed_papers([[query]], f"temp_search_{i}.jsonl")
+                                    else:
+                                        raise attr_error
                                 
                                 # Handle case where paperscraper returns None (known bug)
                                 if papers is None:
@@ -303,7 +344,7 @@ def search_pubmed_comprehensive(search_terms, max_results=5000, date_from="1900"
                                 break
                     
                     # Start search thread
-                    search_thread = threading.Thread(target=search_worker_with_progress)
+                    search_thread = threading.Thread(target=search_worker_with_progress, args=(full_query,))
                     search_thread.daemon = True
                     search_thread.start()
                     
@@ -371,7 +412,13 @@ def search_pubmed_comprehensive(search_terms, max_results=5000, date_from="1900"
                             paper['citation_count'] = 'pending'
                             
                             # Extract impact factor directly (this is fast and local)
-                            paper['impact_factor'] = estimate_impact_factor(paper.get('journal', ''))
+                            journal_name = paper.get('journal', '')
+                            # Ensure journal_name is a string, not a float
+                            if isinstance(journal_name, (int, float)):
+                                journal_name = str(journal_name)
+                            elif not isinstance(journal_name, str):
+                                journal_name = str(journal_name) if journal_name is not None else ''
+                            paper['impact_factor'] = estimate_impact_factor(journal_name)
                             
                             valid_papers.append(paper)
                         else:
@@ -382,9 +429,21 @@ def search_pubmed_comprehensive(search_terms, max_results=5000, date_from="1900"
                 # Silent processing
                 
                 # Add unique valid papers to our collection
+                papers_added_this_round = 0
                 for paper in valid_papers:
                     if paper not in all_papers:
                         all_papers.append(paper)
+                        papers_added_this_round += 1
+                
+                # Auto-save data every N articles
+                current_count = len(all_papers)
+                if current_count > 0 and current_count - last_autosave_count >= auto_save_frequency:
+                    try:
+                        save_papers_to_file(all_papers, f"data/scraped_data/pubmed/pubmed_autosave_{current_count}_papers.jsonl")
+                        print(f"\n💾 Auto-saved {current_count} papers to autosave file")
+                        last_autosave_count = current_count
+                    except Exception as e:
+                        print(f"\n⚠️  Auto-save failed: {e}")
                 
                 # Clean up temporary file
                 if os.path.exists(f"temp_search_{i}.jsonl"):
@@ -418,15 +477,7 @@ def search_pubmed_comprehensive(search_terms, max_results=5000, date_from="1900"
             # Small delay to allow display updates
             time.sleep(0.1)
             
-            # Early exit if we have enough results
-            if len(all_papers) >= max_results:
-                print(f"\n✅ Reached target of {max_results} papers, stopping search")
-                break
-            
-            # Early exit if we have a reasonable number of results and this is a broad search
-            if len(all_papers) >= 1000 and i >= 2:  # After trying at least 3 strategies
-                print(f"\n✅ Found {len(all_papers)} papers with first {i+1} strategies, stopping search")
-                break
+            # Continue searching until all keywords are exhausted
     
     # Final display update
     print()  # New line after the real-time display
@@ -477,7 +528,14 @@ def search_pubmed_comprehensive(search_terms, max_results=5000, date_from="1900"
             
             # Convert to strings and strip safely
             doi = str(doi).strip() if doi is not None else ""
-            title = str(title).strip().lower() if title is not None else ""
+            
+            # Ensure title is a string before processing
+            if isinstance(title, (int, float)):
+                title = str(title)
+            elif not isinstance(title, str):
+                title = str(title) if title is not None else ''
+            
+            title = title.strip().lower() if title else ""
             
             # Check if we've seen this paper before
             if doi and doi not in seen_dois:
@@ -493,15 +551,23 @@ def search_pubmed_comprehensive(search_terms, max_results=5000, date_from="1900"
             continue
     
     print(f"🎯 Found {len(all_papers)} total papers, {len(unique_papers)} unique papers")
+    
+    # Final save of all data
+    try:
+        final_save_path = f"data/scraped_data/pubmed/pubmed_final_{len(unique_papers)}_papers.jsonl"
+        save_papers_to_file(unique_papers, final_save_path)
+        print(f"💾 Final save: {len(unique_papers)} papers saved to {final_save_path}")
+    except Exception as e:
+        print(f"⚠️  Final save failed: {e}")
+    
     return unique_papers
 
-def search_pubmed_direct_api(search_terms, max_results=5000, date_from="1900", date_to=None):
+def search_pubmed_direct_api(search_terms, date_from="1900", date_to=None, auto_save_frequency=500):
     """
-    Optimized fallback PubMed search using direct API calls for maximum paper discovery.
+    Comprehensive PubMed search using direct API calls that searches until no more unique papers are found.
     
     Args:
         search_terms: List of search terms
-        max_results: Maximum number of results to retrieve
         date_from: Start date for search (YYYY or YYYY-MM-DD)
         date_to: End date for search (YYYY or YYYY-MM-DD), defaults to current date
     
@@ -511,9 +577,9 @@ def search_pubmed_direct_api(search_terms, max_results=5000, date_from="1900", d
     if date_to is None:
         date_to = datetime.now().strftime("%Y-%m-%d")
     
-    print(f"🔍 Starting optimized direct PubMed API search...")
+    print(f"🔍 Starting comprehensive direct PubMed API search...")
     print(f"   Date range: {date_from} to {date_to}")
-    print(f"   Target results: {max_results}")
+    print(f"   Searching until no more unique papers found for each keyword")
     
     all_papers = []
     
@@ -524,10 +590,20 @@ def search_pubmed_direct_api(search_terms, max_results=5000, date_from="1900", d
     cleaned_search_terms = []
     for term in search_terms:
         if term is not None:
-            # Convert to string and clean
-            term_str = str(term).strip()
-            if term_str and term_str.lower() not in ['nan', 'none', 'null', '']:
-                cleaned_search_terms.append(term_str)
+            # Convert to string and clean - handle various data types
+            try:
+                if isinstance(term, (int, float)):
+                    # Convert numbers to strings
+                    term_str = str(int(term)) if isinstance(term, float) and term.is_integer() else str(term)
+                else:
+                    term_str = str(term).strip()
+                
+                # Additional validation
+                if term_str and term_str.lower() not in ['nan', 'none', 'null', ''] and len(term_str.strip()) > 0:
+                    cleaned_search_terms.append(term_str.strip())
+            except (ValueError, TypeError) as e:
+                print(f"⚠️  Skipping invalid search term '{term}': {e}")
+                continue
     
     if not cleaned_search_terms:
         print("❌ No valid search terms provided!")
@@ -535,25 +611,21 @@ def search_pubmed_direct_api(search_terms, max_results=5000, date_from="1900", d
     
     print(f"📋 Cleaned search terms: {', '.join(cleaned_search_terms)}")
     
-    # Use the same efficient search strategies as the comprehensive search
-    ubr5_variants = " OR ".join([f'"{term}"' for term in cleaned_search_terms])
+    # Simple approach: search each keyword individually
+    search_strategies = []
+    for term in cleaned_search_terms:
+        # Ensure term is a string and not a float - additional safety check
+        if isinstance(term, (int, float)):
+            term = str(term)
+        elif not isinstance(term, str):
+            term = str(term)
+        
+        # Additional validation to prevent float values from being passed to paperscraper
+        if term and term.strip() and not term.lower() in ['nan', 'none', 'null', '']:
+            # Search each keyword in Title/Abstract
+            search_strategies.append(f'"{term}"[Title/Abstract]')
     
-    # Strategy 1: Combined search for all UBR5 variants (most efficient)
-    combined_query = f"({ubr5_variants})[Title/Abstract]"
-    
-    # Strategy 2: Broader search including MeSH terms
-    mesh_query = f"({ubr5_variants})[MeSH Terms]"
-    
-    # Strategy 3: Title-only search for precision
-    title_query = f"({ubr5_variants})[Title]"
-    
-    search_strategies = [
-        combined_query,      # Most comprehensive
-        mesh_query,          # MeSH terms for broader coverage
-        title_query          # Title-only for precision
-    ]
-    
-    print(f"📋 Generated {len(search_strategies)} efficient API search strategies")
+    print(f"📋 Generated {len(search_strategies)} individual keyword searches")
     
     # Execute searches with progress tracking
     with tqdm(total=len(search_strategies), desc="Executing API searches", unit="strategy") as pbar:
@@ -601,6 +673,14 @@ def search_pubmed_direct_api(search_terms, max_results=5000, date_from="1900", d
                             paper_data = parse_pubmed_xml(article)
                             if paper_data and paper_data not in all_papers:
                                 all_papers.append(paper_data)
+                                
+                                # Auto-save data every N articles
+                                if len(all_papers) > 0 and len(all_papers) % auto_save_frequency == 0:
+                                    try:
+                                        save_papers_to_file(all_papers, f"data/scraped_data/pubmed/pubmed_autosave_{len(all_papers)}_papers.jsonl")
+                                        print(f"\n💾 Auto-saved {len(all_papers)} papers to autosave file")
+                                    except Exception as e:
+                                        print(f"\n⚠️  Auto-save failed: {e}")
                     except ET.ParseError:
                         continue
                     
@@ -663,7 +743,15 @@ def search_pubmed_direct_api(search_terms, max_results=5000, date_from="1900", d
     
     for paper in all_papers:
         doi = str(paper.get('doi', '')).strip()
-        title = str(paper.get('title', '')).strip().lower()
+        title = paper.get('title', '')
+        
+        # Ensure title is a string before processing
+        if isinstance(title, (int, float)):
+            title = str(title)
+        elif not isinstance(title, str):
+            title = str(title) if title is not None else ''
+        
+        title = title.strip().lower()
         
         # Check if we've seen this paper before
         if doi and doi not in seen_dois:
@@ -674,6 +762,15 @@ def search_pubmed_direct_api(search_terms, max_results=5000, date_from="1900", d
             seen_titles.add(title)
     
     print(f"🎯 Found {len(all_papers)} total papers, {len(unique_papers)} unique papers")
+    
+    # Final save of all data
+    try:
+        final_save_path = f"data/scraped_data/pubmed/pubmed_final_{len(unique_papers)}_papers.jsonl"
+        save_papers_to_file(unique_papers, final_save_path)
+        print(f"💾 Final save: {len(unique_papers)} papers saved to {final_save_path}")
+    except Exception as e:
+        print(f"⚠️  Final save failed: {e}")
+    
     return unique_papers
 
 def extract_citation_from_pubmed_xml(article_element):
@@ -1293,6 +1390,12 @@ def get_impact_factor_from_api(journal_name):
 
 def estimate_impact_factor(journal_name):
     """Enhanced impact factor estimation with comprehensive journal database."""
+    # Ensure journal_name is a string
+    if isinstance(journal_name, (int, float)):
+        journal_name = str(journal_name)
+    elif not isinstance(journal_name, str):
+        journal_name = str(journal_name) if journal_name is not None else ''
+    
     if not journal_name or journal_name == "Unknown journal":
         return "not found"
     
@@ -1559,18 +1662,70 @@ CITATION_PROCESSING_ENABLED = os.environ.get("ENABLE_CITATIONS", "true").lower()
 CITATION_TIMEOUT_SECONDS = int(os.environ.get("CITATION_TIMEOUT", "5"))  # Reduced timeout
 
 # --- UTILS ---
-def get_google_embedding(text, api_key):
+# Global session for connection pooling
+_embedding_session = None
+
+def get_embedding_session():
+    """Get or create a global requests session for connection pooling."""
+    global _embedding_session
+    if _embedding_session is None:
+        _embedding_session = requests.Session()
+        # Configure session for better performance
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=10,  # Number of connection pools
+            pool_maxsize=20,      # Maximum connections per pool
+            max_retries=3,        # Retry failed requests
+            pool_block=False      # Don't block when pool is full
+        )
+        _embedding_session.mount('http://', adapter)
+        _embedding_session.mount('https://', adapter)
+    return _embedding_session
+
+def get_google_embedding(text, api_key, retry_count=0):
+    """Get Google embedding with optimized network settings and retry logic."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={api_key}"
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "Connection": "keep-alive",  # Enable connection reuse
+        "User-Agent": "PubMed-Scraper/1.0"  # Identify our requests
+    }
     data = {"model": "models/text-embedding-004", "content": {"parts": [{"text": text}]}}
     
     # Add rate limiting delay
     if config.get("rate_limit_delay", 0) > 0:
         time.sleep(config.get("rate_limit_delay", 0))
     
-    response = requests.post(url, headers=headers, json=data, timeout=config.get("request_timeout", 30))
-    response.raise_for_status()
-    return response.json()["embedding"]["values"]
+    try:
+        # Use session for connection pooling
+        session = get_embedding_session()
+        response = session.post(
+            url, 
+            headers=headers, 
+            json=data, 
+            timeout=config.get("request_timeout", 15),  # Reduced timeout
+            stream=False  # Don't stream for small responses
+        )
+        response.raise_for_status()
+        return response.json()["embedding"]["values"]
+        
+    except requests.exceptions.Timeout:
+        if retry_count < 2:  # Max 2 retries for timeout
+            print(f"⚠️  Timeout for embedding, retrying ({retry_count + 1}/2)...")
+            time.sleep(1)  # Brief delay before retry
+            return get_google_embedding(text, api_key, retry_count + 1)
+        else:
+            print(f"❌ Max retries reached for timeout")
+            return None
+            
+    except requests.exceptions.RequestException as e:
+        if "429" in str(e) and retry_count < 3:  # Rate limit retry
+            wait_time = (2 ** retry_count) * 5  # Exponential backoff: 5s, 10s, 20s
+            print(f"⚠️  Rate limited, waiting {wait_time}s before retry ({retry_count + 1}/3)...")
+            time.sleep(wait_time)
+            return get_google_embedding(text, api_key, retry_count + 1)
+        else:
+            print(f"❌ Request error: {e}")
+            return None
 
 def chunk_paragraphs(text):
     """Safely chunk text into paragraphs, handling None and empty values."""
@@ -1587,6 +1742,64 @@ def save_embeddings_to_json(embeddings_data, filename="embeddings.json"):
         json.dump(embeddings_data, f, indent=2, ensure_ascii=False)
     print(f"💾 Saved embeddings to {filename}")
 
+def save_embeddings_incremental(embeddings_data, filename="embeddings.json", batch_size=10):
+    """Save embeddings incrementally to prevent data loss"""
+    # Create backup filename
+    backup_filename = filename.replace('.json', '_backup.json')
+    
+    # Save to backup first
+    with open(backup_filename, 'w', encoding='utf-8') as f:
+        json.dump(embeddings_data, f, indent=2, ensure_ascii=False)
+    
+    # Then save to main file
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(embeddings_data, f, indent=2, ensure_ascii=False)
+    
+    print(f"💾 Incrementally saved {len(embeddings_data['embeddings'])} embeddings to {filename}")
+
+def save_batch_pubmed(batch_data, batch_num, embeddings_dir):
+    """Save a batch of PubMed embeddings to a file"""
+    # Ensure directory exists
+    os.makedirs(embeddings_dir, exist_ok=True)
+    
+    batch_file = os.path.join(embeddings_dir, f"batch_{batch_num:04d}.json")
+    
+    batch_content = {
+        "source": "pubmed",
+        "batch_num": batch_num,
+        "timestamp": datetime.now().isoformat(),
+        "embeddings": batch_data["embeddings"],
+        "chunks": batch_data["chunks"],
+        "metadata": batch_data["metadata"],
+        "stats": {
+            "total_embeddings": len(batch_data["embeddings"]),
+            "total_chunks": len(batch_data["chunks"])
+        }
+    }
+    
+    with open(batch_file, 'w', encoding='utf-8') as f:
+        json.dump(batch_content, f, indent=2, ensure_ascii=False)
+    
+    print(f"💾 Saved PubMed batch {batch_num:04d} with {len(batch_data['embeddings'])} embeddings")
+    return batch_file
+
+def append_embedding_to_batch(chunk, embedding, metadata, current_batch, batch_num, embeddings_dir, batch_size=100):
+    """Append a single embedding to the current batch and save when full"""
+    # Add to current batch
+    current_batch["chunks"].append(chunk)
+    current_batch["embeddings"].append(embedding)
+    current_batch["metadata"].append(metadata)
+    
+    # Save batch if it reaches the size limit
+    if len(current_batch["embeddings"]) >= batch_size:
+        batch_file = save_batch_pubmed(current_batch, batch_num, embeddings_dir)
+        # Reset batch
+        current_batch = {"chunks": [], "embeddings": [], "metadata": []}
+        batch_num += 1
+        return current_batch, batch_num, batch_file
+    else:
+        return current_batch, batch_num, None
+
 def load_embeddings_from_json(filename="embeddings.json"):
     """Load embeddings and metadata from JSON file"""
     if os.path.exists(filename):
@@ -1594,8 +1807,9 @@ def load_embeddings_from_json(filename="embeddings.json"):
             return json.load(f)
     return {"chunks": [], "embeddings": [], "metadata": []}
 
-DUMP_FILE = "data/scraped_data/pubmed_dump.jsonl"
-EMBEDDINGS_FILE = "data/embeddings/xrvix_embeddings/pubmed_embeddings.json"
+DUMP_FILE = "data/scraped_data/pubmed/pubmed_dump.jsonl"
+EMBEDDINGS_DIR = "data/embeddings/pubmed"
+EMBEDDINGS_FILE = os.path.join(EMBEDDINGS_DIR, "pubmed_embeddings.json")
 
 def get_search_terms():
     """Get search terms from configuration file or use defaults."""
@@ -1727,6 +1941,67 @@ def load_embeddings_to_chromadb(embeddings_data, source_name="pubmed"):
         print(f"❌ Error loading embeddings to ChromaDB: {e}")
         return False
 
+def load_pubmed_batches_to_chromadb(embeddings_dir, source_name="pubmed"):
+    """Load all PubMed batch files into ChromaDB"""
+    try:
+        import glob
+        
+        # Find all batch files
+        batch_files = glob.glob(os.path.join(embeddings_dir, "batch_*.json"))
+        batch_files.sort()  # Sort to ensure correct order
+        
+        if not batch_files:
+            print(f"❌ No batch files found in {embeddings_dir}")
+            return False
+        
+        print(f"\n🗄️  Loading {len(batch_files)} PubMed batch files into ChromaDB...")
+        
+        # Initialize ChromaDB manager
+        chroma_manager = ChromaDBManager()
+        
+        # Create collection if it doesn't exist
+        if not chroma_manager.create_collection():
+            print("❌ Failed to create ChromaDB collection")
+            return False
+        
+        total_embeddings = 0
+        for batch_file in batch_files:
+            try:
+                with open(batch_file, 'r', encoding='utf-8') as f:
+                    batch_data = json.load(f)
+                
+                embeddings = batch_data.get("embeddings", [])
+                chunks = batch_data.get("chunks", [])
+                metadata = batch_data.get("metadata", [])
+                
+                if embeddings and chunks and metadata:
+                    # Create embeddings_data structure for compatibility
+                    embeddings_data = {
+                        "embeddings": embeddings,
+                        "chunks": chunks,
+                        "metadata": metadata
+                    }
+                    
+                    if chroma_manager.add_embeddings_to_collection(embeddings_data, source_name):
+                        total_embeddings += len(embeddings)
+                        print(f"✅ Loaded batch {os.path.basename(batch_file)}: {len(embeddings)} embeddings")
+                    else:
+                        print(f"❌ Failed to load batch {os.path.basename(batch_file)}")
+                
+            except Exception as e:
+                print(f"❌ Error loading batch {batch_file}: {e}")
+                continue
+        
+        # Display collection stats
+        stats = chroma_manager.get_collection_stats()
+        print(f"✅ Successfully loaded {total_embeddings} PubMed embeddings into ChromaDB")
+        print(f"📊 ChromaDB collection now contains {stats.get('total_documents', 0)} total documents")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error loading PubMed batches to ChromaDB: {e}")
+        return False
+
 def ensure_directory_structure():
     """Ensure the data/embeddings/xrvix_embeddings directory exists and handle migration from old paths."""
     # Create the main directory
@@ -1823,12 +2098,310 @@ def cleanup_temp_files():
         print(f"✅ Cleaned up {cleaned_count} temporary files")
     return cleaned_count
 
-def main(max_results=None, search_terms=None):
+def get_processed_papers_from_batches(embeddings_dir):
+    """Get set of already processed paper DOIs/titles from existing batch files."""
+    processed_papers = set()
+    
+    try:
+        if not os.path.exists(embeddings_dir):
+            return processed_papers
+            
+        # Look for batch files
+        batch_files = [f for f in os.listdir(embeddings_dir) if f.startswith('batch_') and f.endswith('.jsonl')]
+        
+        for batch_file in batch_files:
+            batch_path = os.path.join(embeddings_dir, batch_file)
+            try:
+                with open(batch_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if line.strip():
+                            batch_data = json.loads(line)
+                            if 'metadata' in batch_data:
+                                metadata = batch_data['metadata']
+                                # Use DOI as primary identifier, fallback to title
+                                paper_id = metadata.get('doi', '') or metadata.get('title', '')
+                                if paper_id:
+                                    processed_papers.add(paper_id)
+            except Exception as e:
+                print(f"⚠️  Error reading batch file {batch_file}: {e}")
+                continue
+                
+    except Exception as e:
+        print(f"⚠️  Error scanning existing batches: {e}")
+    
+    return processed_papers
+
+def is_paper_already_processed(paper, processed_papers):
+    """Check if a paper has already been processed based on DOI or title."""
+    # Check DOI first (most reliable)
+    doi = paper.get('doi', '')
+    if doi and doi in processed_papers:
+        return True
+    
+    # Check title as fallback
+    title = paper.get('title', '')
+    if title and title in processed_papers:
+        return True
+    
+    return False
+
+def process_existing_pubmed_data(data_file_path, api_key, progress_callback=None):
     """
-    Main function for PubMed scraping and processing.
+    Process existing PubMed data file to generate embeddings.
     
     Args:
-        max_results: Maximum number of papers to retrieve (optional)
+        data_file_path: Path to the PubMed data file (.jsonl)
+        api_key: Google API key for embedding generation
+        progress_callback: Optional callback function to report progress (current, total)
+    """
+    print(f"🔄 Processing existing PubMed data: {os.path.basename(data_file_path)}")
+    print("="*60)
+    
+    try:
+        # Load papers from the data file
+        papers = []
+        with open(data_file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.strip():
+                    papers.append(json.loads(line))
+        
+        print(f"📚 Loaded {len(papers)} papers from {os.path.basename(data_file_path)}")
+        
+        if not papers:
+            print("❌ No papers found in the data file")
+            return False
+        
+        # Ensure embeddings directory exists
+        ensure_directory_structure()
+        
+        # Check for existing embeddings to avoid duplicates
+        print("🔍 Checking for existing embeddings...")
+        processed_papers = get_processed_papers_from_batches(EMBEDDINGS_DIR)
+        print(f"📊 Found {len(processed_papers)} already processed papers")
+        
+        # Filter out already processed papers
+        unprocessed_papers = []
+        skipped_count = 0
+        for paper in papers:
+            if is_paper_already_processed(paper, processed_papers):
+                skipped_count += 1
+            else:
+                unprocessed_papers.append(paper)
+        
+        print(f"⏭️  Skipped {skipped_count} already processed papers")
+        print(f"🔄 Will process {len(unprocessed_papers)} new papers")
+        
+        if not unprocessed_papers:
+            print("✅ All papers already processed!")
+            return True
+        
+        # Use unprocessed papers for the rest of the function
+        papers = unprocessed_papers
+        
+        # Initialize batch tracking
+        current_batch = {"embeddings": [], "chunks": [], "metadata": []}
+        batch_num = 0
+        total_embeddings = 0
+        total_chunks = 0
+        
+        print(f"🚀 Starting embedding generation for {len(papers)} papers...")
+        
+        # Import tqdm for progress bar
+        try:
+            from tqdm import tqdm
+        except ImportError:
+            print("⚠️  tqdm not available, using basic progress display")
+            tqdm = lambda x, **kwargs: x
+        
+        # Calculate total expected embeddings for progress tracking
+        total_expected_embeddings = 0
+        for paper in papers:
+            title = paper.get('title', '')
+            abstract = paper.get('abstract', '')
+            full_text = f"{title}\n\n{abstract}" if abstract else title
+            paragraphs = chunk_paragraphs(full_text)
+            total_expected_embeddings += len([para for para in paragraphs if para and para.strip()])
+        
+        print(f"📊 Expected total embeddings: {total_expected_embeddings}")
+        
+        # Create embedding progress bar
+        embedding_progress = tqdm(total=total_expected_embeddings, desc="🚀 Generating embeddings", 
+                                unit="embedding", bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} embeddings [{elapsed}<{remaining}, {rate_fmt}]')
+        
+        # Process papers with parallel processing for better performance
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+        
+        # Use parallel processing for better performance
+        max_workers = min(4, len(papers))  # Limit to 4 workers to avoid overwhelming API
+        print(f"🚀 Using {max_workers} parallel workers for embedding generation")
+        
+        # Thread-safe counters
+        embedding_lock = threading.Lock()
+        processed_count = [0]  # Use list for mutable reference
+        
+        def process_paper_parallel(paper_data):
+            """Process a single paper in parallel."""
+            idx, paper = paper_data
+            
+            try:
+                # Extract paper data
+                title = paper.get('title', '')
+                abstract = paper.get('abstract', '')
+                doi = paper.get('doi', '')
+                authors = paper.get('authors', [])
+                publication_date = paper.get('date', '')
+                journal = paper.get('journal', '')
+                citation_count = paper.get('citation_count', 0)
+                impact_factor = paper.get('impact_factor', 0)
+                
+                # Extract year from publication date
+                year = ""
+                if publication_date:
+                    try:
+                        year = str(publication_date)[:4] if len(str(publication_date)) >= 4 else ""
+                    except:
+                        year = ""
+                
+                # Create author string
+                author = ""
+                if authors and isinstance(authors, list) and len(authors) > 0:
+                    author = authors[0] if isinstance(authors[0], str) else str(authors[0])
+                elif isinstance(authors, str):
+                    author = authors
+                
+                # Extract additional metadata
+                additional_metadata = extract_additional_metadata(paper)
+                
+                # Create citation data
+                citation_data = {
+                    'citation_count': citation_count,
+                    'journal': journal,
+                    'impact_factor': impact_factor
+                }
+                
+                # Combine title and abstract for chunking
+                full_text = f"{title}\n\n{abstract}" if abstract else title
+                
+                # Chunk the text into paragraphs
+                paragraphs = chunk_paragraphs(full_text)
+                
+                if not paragraphs:
+                    return []
+                
+                # Process paragraphs for this paper
+                results = []
+                valid_paragraphs = [para for para in paragraphs if para and para.strip()]
+                
+                for i, para in enumerate(valid_paragraphs):
+                    try:
+                        embedding = get_google_embedding(para, api_key)
+                        
+                        if embedding is None:
+                            continue
+                        
+                        # Create comprehensive metadata object
+                        metadata = {
+                            "title": title,
+                            "doi": doi,
+                            "author": author,
+                            "publication_date": publication_date,
+                            "citation_count": citation_data['citation_count'],
+                            "journal": citation_data['journal'],
+                            "impact_factor": citation_data['impact_factor'],
+                            "source": "pubmed",
+                            "paper_index": idx,
+                            "para_idx": i,
+                            "chunk_length": len(para),
+                            "year": year
+                        }
+                        
+                        # Add additional metadata fields if available
+                        metadata.update(additional_metadata)
+                        
+                        results.append({
+                            "embedding": embedding,
+                            "chunk": para,
+                            "metadata": metadata
+                        })
+                        
+                    except Exception as e:
+                        print(f"\n⚠️  Embedding error for paper {idx + 1}: {e}")
+                        continue
+                
+                return results
+                
+            except Exception as e:
+                print(f"⚠️  Error processing paper {idx + 1}: {e}")
+                return []
+        
+        # Process papers in parallel
+        paper_results = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all papers for processing
+            future_to_paper = {
+                executor.submit(process_paper_parallel, (idx, paper)): (idx, paper) 
+                for idx, paper in enumerate(papers)
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_paper):
+                idx, paper = future_to_paper[future]
+                try:
+                    results = future.result()
+                    if results:
+                        paper_results.extend(results)
+                        
+                        # Update progress
+                        with embedding_lock:
+                            processed_count[0] += len(results)
+                            embedding_progress.update(len(results))
+                            embedding_progress.set_postfix({
+                                'processed': processed_count[0],
+                                'paper': f"{idx+1}/{len(papers)}"
+                            })
+                            
+                            # Call progress callback if provided
+                            if progress_callback:
+                                progress_callback(processed_count[0], total_expected_embeddings)
+                        
+                except Exception as e:
+                    print(f"⚠️  Error in parallel processing for paper {idx + 1}: {e}")
+        
+        # Now add all results to batches
+        print(f"📊 Adding {len(paper_results)} embeddings to batches...")
+        for result in paper_results:
+            current_batch, batch_num, batch_file = append_embedding_to_batch(
+                result["chunk"], result["embedding"], result["metadata"], 
+                current_batch, batch_num, EMBEDDINGS_DIR, batch_size=100
+            )
+        
+        total_embeddings = len(paper_results)
+        total_chunks = sum(len(chunk_paragraphs(f"{paper.get('title', '')}\n\n{paper.get('abstract', '')}")) for paper in papers)
+        
+        # Save any remaining embeddings in the current batch
+        if current_batch["embeddings"]:
+            batch_file = save_batch_pubmed(current_batch, batch_num, EMBEDDINGS_DIR)
+            print(f"💾 Saved final batch {batch_num:04d} with {len(current_batch['embeddings'])} embeddings")
+        
+        print(f"🎉 Processing completed!")
+        print(f"📊 Total chunks processed: {total_chunks}")
+        print(f"📊 Total embeddings created: {total_embeddings}")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error processing PubMed data: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def main(search_terms=None):
+    """
+    Main function for PubMed scraping and processing.
+    Searches until no more unique papers are found for each keyword.
+    
+    Args:
         search_terms: List of search terms (optional)
     """
     try:
@@ -1868,18 +2441,6 @@ def main(max_results=None, search_terms=None):
         print(f"🔍 Search terms: {', '.join(search_terms)}")
         flush_output()
 
-        # Get maximum results from user (or use provided parameter)
-        if max_results is None:
-            max_results = get_max_results_from_user()
-            if max_results is None:
-                print("❌ Search cancelled by user")
-                return
-        else:
-            print(f"🎯 Using provided target: {max_results} papers maximum")
-        
-        print(f"🎯 Target: {max_results} papers maximum")
-        flush_output()
-
         # Load API key
         with open("config/keys.json") as f:
             api_key = json.load(f)["GOOGLE_API_KEY"]
@@ -1887,9 +2448,11 @@ def main(max_results=None, search_terms=None):
         # Step 1: Fetch and dump PubMed papers
         print(f"\n🔄 Fetching PubMed papers for {len(search_terms)} search terms...")
         print("⏱️  This may take several minutes...")
+        print("🔍 Searching until no more unique papers found for each keyword")
         
-        # Use the new comprehensive search function with user-specified max_results
-        papers_to_process = search_pubmed_comprehensive(search_terms, max_results=max_results)
+        # Use the comprehensive search function (no max_results limit)
+        # Auto-save every 500 papers by default
+        papers_to_process = search_pubmed_comprehensive(search_terms, auto_save_frequency=500)
         
         if not papers_to_process:
             print("❌ No papers found. Exiting.")
@@ -1946,21 +2509,15 @@ def main(max_results=None, search_terms=None):
         df = pd.DataFrame(valid_papers)
         print(f"📊 Loaded {len(df)} papers for processing")
 
-        # Initialize embeddings storage
-        embeddings_data = {
-            "chunks": [],
-            "embeddings": [],
-            "metadata": [],
-            "stats": {
-                "total_papers": len(df),
-                "total_chunks": 0,
-                "total_embeddings": 0
-            }
-        }
-
-        # Process papers with progress bar
+        # Initialize batch storage
+        current_batch = {"chunks": [], "embeddings": [], "metadata": []}
+        batch_num = 0
         total_chunks = 0
         total_embeddings = 0
+        
+        # Ensure directories exist
+        os.makedirs(os.path.dirname(DUMP_FILE), exist_ok=True)
+        os.makedirs(EMBEDDINGS_DIR, exist_ok=True)
         
         print(f"\n🔄 Processing papers and creating embeddings...")
         if CITATION_PROCESSING_ENABLED:
@@ -2063,13 +2620,18 @@ def main(max_results=None, search_terms=None):
                             # Add additional metadata fields if available
                             metadata.update(additional_metadata)
                             
-                            # Store chunk, embedding, and metadata
-                            embeddings_data["chunks"].append(para)
-                            embeddings_data["embeddings"].append(embedding)
-                            embeddings_data["metadata"].append(metadata)
+                            # Add to batch and save when full
+                            current_batch, batch_num, batch_file = append_embedding_to_batch(
+                                para, embedding, metadata, current_batch, batch_num, EMBEDDINGS_DIR, batch_size=100
+                            )
                             
                             paper_embeddings += 1
                             total_embeddings += 1
+                            
+                            # Print progress every 50 embeddings
+                            if total_embeddings % 50 == 0:
+                                print(f"💾 Processed {total_embeddings} embeddings so far...")
+                                
                         except Exception as e:
                             print(f"\n⚠️  Embedding error for PubMed paper {idx}: {e}")
                             continue
@@ -2083,15 +2645,16 @@ def main(max_results=None, search_terms=None):
                 pbar.update(1)
                 pbar.set_postfix({"chunks": total_chunks, "embeddings": total_embeddings})
         
-        # Update final statistics
-        embeddings_data["stats"]["total_chunks"] = total_chunks
-        embeddings_data["stats"]["total_embeddings"] = total_embeddings
+        # Save any remaining embeddings in the current batch
+        if current_batch["embeddings"]:
+            batch_file = save_batch_pubmed(current_batch, batch_num, EMBEDDINGS_DIR)
+            print(f"💾 Saved final PubMed batch {batch_num:04d} with {len(current_batch['embeddings'])} embeddings")
         
-        # Save embeddings to JSON
-        save_embeddings_to_json(embeddings_data, EMBEDDINGS_FILE)
+        print(f"🎉 PubMed batch processing completed! Total embeddings: {total_embeddings}")
         
         # Step 3: Automatically load embeddings into ChromaDB
-        load_embeddings_to_chromadb(embeddings_data, "pubmed")
+        # Note: For batch processing, we'll need to load all batch files
+        load_pubmed_batches_to_chromadb(EMBEDDINGS_DIR, "pubmed")
         
         # Print final statistics
         print(f"\n🎉 PubMed processing complete!")

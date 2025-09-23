@@ -130,6 +130,12 @@ def extract_impact_factor(paper_data, journal_name=None):
     logger.info(f"🔍 DEBUG: Extracting impact factor for paper with DOI: {paper_data.get('doi', 'None')}")
     
     # Check if this is a preprint first - preprints have no impact factor
+    # Quick check for bioRxiv DOIs (10.1101/) and medRxiv DOIs (10.1101/)
+    doi = paper_data.get("doi", "")
+    if doi.startswith("10.1101/"):
+        logger.info(f"🔍 DEBUG: bioRxiv DOI detected, returning impact factor: 0.0")
+        return "0.0"  # Preprints have no impact factor
+    
     is_preprint, preprint_type, preprint_score = is_preprint_paper(paper_data)
     if is_preprint:
         logger.info(f"🔍 DEBUG: Preprint detected, returning impact factor: 0.0")
@@ -1146,7 +1152,18 @@ def extract_journal_info(paper_data):
     logger.info(f"🔍 DEBUG: Extracting journal info for paper with DOI: {paper_data.get('doi', 'None')}")
     
     # Check if this is a preprint first - skip expensive API calls for preprints
+    # Quick check for bioRxiv DOIs (10.1101/) and medRxiv DOIs (10.1101/)
+    doi = paper_data.get("doi", "")
+    if doi.startswith("10.1101/"):
+        logger.info(f"🔍 DEBUG: bioRxiv DOI detected, returning: BIORXIV")
+        return "BIORXIV"
+    
     is_preprint, preprint_type, preprint_score = is_preprint_paper(paper_data)
+    logger.info(f"🔍 DEBUG: Preprint detection result - is_preprint: {is_preprint}, type: {preprint_type}, score: {preprint_score}")
+    logger.info(f"🔍 DEBUG: Paper data keys: {list(paper_data.keys())}")
+    logger.info(f"🔍 DEBUG: Source field: '{paper_data.get('source', 'NOT_FOUND')}'")
+    logger.info(f"🔍 DEBUG: Journal field: '{paper_data.get('journal', 'NOT_FOUND')}'")
+    
     if is_preprint:
         # Return appropriate preprint server name
         source = paper_data.get("source", "").lower()
@@ -1401,10 +1418,11 @@ if PAPERSCRAPER_AVAILABLE:
     try:
         DUMP_ROOT = pkg_resources.resource_filename("paperscraper", "server_dumps")
     except Exception:
-        DUMP_ROOT = "data/scraped_data/paperscraper_dumps"  # Fallback to local directory
+        DUMP_ROOT = "data/scraped_data/xrvix/paperscraper_dumps"  # Fallback to local directory
 else:
-    DUMP_ROOT = "data/scraped_data/paperscraper_dumps"  # Use local directory when paperscraper not available
+    DUMP_ROOT = "data/scraped_data/xrvix/paperscraper_dumps"  # Use local directory when paperscraper not available
 EMBEDDINGS_DIR = "data/embeddings/xrvix_embeddings"
+SCRAPED_DATA_DIR = "data/scraped_data/xrvix"
 
 # Rate limiting settings
 # Different limits for different API endpoints
@@ -3338,6 +3356,18 @@ def get_paperscraper_dump_cache():
 def extract_citation_count(paper_data):
     """Extract citation count using paperscraper dumps first, then API fallbacks."""
     global citation_error_counter
+
+    # Check if this is a preprint first - skip expensive API calls for preprints
+    # Quick check for bioRxiv DOIs (10.1101/) and medRxiv DOIs (10.1101/)
+    doi = paper_data.get("doi", "")
+    if doi.startswith("10.1101/"):
+        logger.info(f"🔍 DEBUG: bioRxiv DOI detected, returning citation count: 0")
+        return "0"  # Preprints typically have minimal citations
+    
+    is_preprint, preprint_type, preprint_score = is_preprint_paper(paper_data)
+    if is_preprint:
+        logger.info(f"🔍 DEBUG: Preprint detected, returning citation count: 0")
+        return "0"  # Preprints typically have minimal citations
 
     # First, check if citation data is already in the paper_data (fastest)
     citation_fields = [

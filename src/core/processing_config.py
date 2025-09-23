@@ -7,7 +7,7 @@ Adjust these settings based on your system capabilities and API limits.
 # Optimized parallel processing configuration
 MAX_WORKERS = 8  # Increased from 6 to 8 for faster processing
 BATCH_SIZE = 500  # Increased from 200 to 500 for fewer citation processing cycles
-RATE_LIMIT_DELAY = 0.02  # Reduced from 0.04 to 0.02 for faster processing
+RATE_LIMIT_DELAY = 0.04  # 25 req/s to stay within Google's 1500 req/min limit
 REQUEST_TIMEOUT = 30  # Reduced from 60 to 30 for faster failure detection
 MIN_CHUNK_LENGTH = 50  # Minimum chunk length for text splitting
 MAX_CHUNK_LENGTH = 8000  # Maximum chunk length for text splitting
@@ -31,13 +31,17 @@ MAX_CHUNK_LENGTH = 8000  # Maximum character length for a chunk
 
 # --- RATE LIMITING ---
 # Different limits for different API endpoints
-EMBEDDING_MAX_REQUESTS_PER_MINUTE = 1500  # Embedding API: 1500 requests per minute
+EMBEDDING_MAX_REQUESTS_PER_MINUTE = 1500  # Embedding API: 1500 requests per minute (25 req/s)
 GEMINI_MAX_REQUESTS_PER_MINUTE = 1000     # Gemini API: 1000 requests per minute
 MAX_BATCH_ENQUEUED_TOKENS = 3_000_000     # Max batch enqueued tokens
 RATE_LIMIT_WINDOW = 60  # Rate limiting window in seconds
 
 # Use embedding limit for processing (since that's what we use most)
 MAX_REQUESTS_PER_MINUTE = EMBEDDING_MAX_REQUESTS_PER_MINUTE
+
+# IMPORTANT: RATE_LIMIT_DELAY must be >= 0.04s to stay within Google's 25 req/s limit
+# Google allows 1500 requests/minute = 25 requests/second
+# Therefore: 1 second ÷ 25 requests = 0.04 seconds between requests
 
 # --- MEMORY OPTIMIZATION ---
 SAVE_INTERVAL = 1000  # Save metadata every N papers
@@ -51,8 +55,8 @@ DUMPS = ["biorxiv", "medrxiv"]  # Only process these sources
 PERFORMANCE_PROFILES = {
     "parallel_fixed": {
         "max_workers": 1,
-        "request_timeout": 60,
-        "rate_limit_delay": 0.04,  # 25 requests/sec
+        "request_timeout": 15,  # Reduced timeout for faster failure detection
+        "rate_limit_delay": 0.04,  # 25 requests/sec (within Google's 1500 req/min limit)
         "batch_size": 100,
         "db_batch_size": 5000
     }

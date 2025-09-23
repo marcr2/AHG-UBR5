@@ -223,10 +223,9 @@ class ScraperProgressWrapper:
             sys.stdout = progress_wrapper
             
             try:
-                # Run the scraper with real-time progress updates
+                # Run the scraper with real-time progress updates (no max_results limit)
                 papers = search_pubmed_comprehensive(
-                    search_terms=search_terms,
-                    max_results=max_results
+                    search_terms=search_terms
                 )
                 
                 self.update_progress("✅ PubMed search completed successfully!")
@@ -673,6 +672,22 @@ Use this option to regenerate embeddings if needed."""
         self.embeddings_status_label = ttk.Label(status_frame, text="Checking status...")
         self.embeddings_status_label.pack(anchor=tk.W)
         
+        # Selective generation options
+        options_frame = ttk.LabelFrame(parent, text="Selective Embedding Generation", padding=10)
+        options_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        # Radio buttons for selection
+        self.embedding_source_var = tk.StringVar(value="all")
+        
+        ttk.Radiobutton(options_frame, text="🔄 Generate All Embeddings (PubMed + Preprints)", 
+                       variable=self.embedding_source_var, value="all").pack(anchor=tk.W, pady=2)
+        
+        ttk.Radiobutton(options_frame, text="📚 Generate PubMed Embeddings Only (Journal Articles)", 
+                       variable=self.embedding_source_var, value="pubmed").pack(anchor=tk.W, pady=2)
+        
+        ttk.Radiobutton(options_frame, text="📄 Generate Preprint Embeddings Only (BioRxiv + MedRxiv)", 
+                       variable=self.embedding_source_var, value="preprints").pack(anchor=tk.W, pady=2)
+        
         # Buttons
         button_frame = ttk.Frame(parent)
         button_frame.pack(fill=tk.X, pady=(0, 20))
@@ -684,6 +699,24 @@ Use this option to regenerate embeddings if needed."""
         generate_button = ttk.Button(button_frame, text="🔄 Generate Embeddings", 
                                    command=self.generate_embeddings_gui, style='Action.TButton')
         generate_button.pack(side=tk.LEFT)
+        
+        # Progress area
+        progress_frame = ttk.LabelFrame(parent, text="Embedding Generation Progress", padding=10)
+        progress_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        # Progress heading
+        self.embedding_progress_label = ttk.Label(progress_frame, text="Ready to start", 
+                                                font=('Arial', 10, 'bold'))
+        self.embedding_progress_label.pack(anchor=tk.W, pady=(0, 5))
+        
+        # Progress bar
+        self.embedding_progress_bar = ttk.Progressbar(progress_frame, mode='determinate')
+        self.embedding_progress_bar.pack(fill=tk.X, pady=(0, 5))
+        
+        # File progress info
+        self.embedding_file_info = ttk.Label(progress_frame, text="", 
+                                           font=('Courier', 9), foreground='blue')
+        self.embedding_file_info.pack(anchor=tk.W)
         
         # Output area
         output_frame = ttk.LabelFrame(parent, text="Output", padding=10)
@@ -761,6 +794,25 @@ The system will load embeddings from:
         
         self.load_status_label = ttk.Label(status_frame, text="Checking status...")
         self.load_status_label.pack(anchor=tk.W)
+        
+        # Selective loading options
+        load_options_frame = ttk.LabelFrame(parent, text="Selective Loading Options", padding=10)
+        load_options_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        # Radio buttons for loading selection
+        self.load_source_var = tk.StringVar(value="all")
+        
+        ttk.Radiobutton(load_options_frame, text="📥 Load All Embeddings (PubMed + Preprints + Semantic Scholar)", 
+                       variable=self.load_source_var, value="all").pack(anchor=tk.W, pady=2)
+        
+        ttk.Radiobutton(load_options_frame, text="📚 Load PubMed Embeddings Only (Journal Articles)", 
+                       variable=self.load_source_var, value="pubmed").pack(anchor=tk.W, pady=2)
+        
+        ttk.Radiobutton(load_options_frame, text="📄 Load Preprint Embeddings Only (BioRxiv + MedRxiv)", 
+                       variable=self.load_source_var, value="preprints").pack(anchor=tk.W, pady=2)
+        
+        ttk.Radiobutton(load_options_frame, text="🎓 Load Semantic Scholar Embeddings Only", 
+                       variable=self.load_source_var, value="semantic").pack(anchor=tk.W, pady=2)
         
         # Buttons
         button_frame = ttk.Frame(parent)
@@ -2673,14 +2725,285 @@ STEP 5: Analyze Results
             self.embeddings_status_label.config(text=f"❌ Error checking status: {e}")
             
     def generate_embeddings_gui(self):
-        """Generate embeddings."""
-        self.log_message(self.embeddings_output, "Embedding generation is typically done during the scraping process.")
-        self.log_message(self.embeddings_output, "If you need to regenerate embeddings, run the scraping options first.")
+        """Generate embeddings based on selected source."""
+        source = self.embedding_source_var.get()
         
-        if os.path.exists("data/embeddings/xrvix_embeddings"):
-            self.log_message(self.embeddings_output, "✅ Embeddings directory exists")
-        else:
-            self.log_message(self.embeddings_output, "❌ No embeddings found - run scraping options first")
+        self.log_message(self.embeddings_output, f"🔄 Starting embedding generation for: {source}")
+        
+        if source == "all":
+            self.log_message(self.embeddings_output, "📚 Generating embeddings for all sources (PubMed + Preprints)")
+            self.log_message(self.embeddings_output, "💡 This will process both journal articles and preprints")
+            
+        elif source == "pubmed":
+            self.log_message(self.embeddings_output, "📚 Generating embeddings for PubMed data only")
+            self.log_message(self.embeddings_output, "💡 This will process journal articles from PubMed")
+            
+        elif source == "preprints":
+            self.log_message(self.embeddings_output, "📄 Generating embeddings for preprints only")
+            self.log_message(self.embeddings_output, "💡 This will process BioRxiv and MedRxiv data")
+        
+        # Check if we have the required data
+        if source in ["all", "pubmed"]:
+            pubmed_dir = "data/scraped_data/pubmed"
+            if os.path.exists(pubmed_dir):
+                pubmed_files = [f for f in os.listdir(pubmed_dir) if f.endswith('.jsonl')]
+                if pubmed_files:
+                    self.log_message(self.embeddings_output, f"✅ Found {len(pubmed_files)} PubMed data files")
+                else:
+                    self.log_message(self.embeddings_output, "❌ No PubMed data files found - run PubMed scraping first")
+            else:
+                self.log_message(self.embeddings_output, "❌ No PubMed data directory found - run PubMed scraping first")
+        
+        if source in ["all", "preprints"]:
+            xrvix_dir = "data/embeddings/xrvix_embeddings"
+            if os.path.exists(xrvix_dir):
+                self.log_message(self.embeddings_output, "✅ Found xrvix embeddings directory")
+            else:
+                self.log_message(self.embeddings_output, "❌ No xrvix embeddings found - run preprints scraping first")
+        
+        # Check API key
+        try:
+            with open("config/keys.json", 'r') as f:
+                keys = json.load(f)
+            google_api_key = keys.get("GOOGLE_API_KEY")
+            if google_api_key:
+                self.log_message(self.embeddings_output, "✅ Google API key found")
+            else:
+                self.log_message(self.embeddings_output, "❌ No Google API key found - add to config/keys.json")
+                return
+        except Exception as e:
+            self.log_message(self.embeddings_output, f"❌ Error loading API keys: {e}")
+            return
+        
+        # Reset progress bar
+        self.embedding_progress_bar['value'] = 0
+        self.embedding_progress_label.config(text="Ready to start")
+        self.embedding_file_info.config(text="")
+        
+        # Start the embedding generation process
+        self.start_progress()
+        self.update_status("Generating embeddings...")
+        
+        def run_embedding_generation():
+            try:
+                if source == "pubmed":
+                    self.run_pubmed_embedding_generation()
+                elif source == "preprints":
+                    self.run_preprints_embedding_generation()
+                elif source == "all":
+                    self.run_all_embedding_generation()
+                    
+            except Exception as e:
+                self.log_message(self.embeddings_output, f"❌ Error during embedding generation: {e}")
+                self.embedding_progress_label.config(text="❌ Error occurred")
+                self.embedding_file_info.config(text="")
+            finally:
+                self.stop_progress()
+                self.update_status("Ready")
+        
+        # Run in separate thread
+        threading.Thread(target=run_embedding_generation, daemon=True).start()
+    
+    def run_pubmed_embedding_generation(self):
+        """Run PubMed embedding generation with progress tracking."""
+        try:
+            import sys
+            sys.path.append('src/scrapers')
+            from pubmed_scraper_json import process_existing_pubmed_data
+            
+            # Load API key
+            with open("config/keys.json", 'r') as f:
+                keys = json.load(f)
+            google_api_key = keys.get("GOOGLE_API_KEY")
+            
+            # Find PubMed files
+            pubmed_dir = "data/scraped_data/pubmed"
+            pubmed_files = [f for f in os.listdir(pubmed_dir) if f.endswith('.jsonl') and f.startswith('pubmed_final_')]
+            
+            if not pubmed_files:
+                self.log_message(self.embeddings_output, "❌ No PubMed final files found")
+                return
+            
+            # Sort files by size (largest first)
+            pubmed_files.sort(key=lambda f: os.path.getsize(os.path.join(pubmed_dir, f)), reverse=True)
+            
+            total_files = len(pubmed_files)
+            self.log_message(self.embeddings_output, f"📚 Found {total_files} PubMed files to process")
+            
+            # Calculate total expected embeddings across all files
+            total_expected_embeddings = 0
+            file_embedding_counts = {}
+            
+            self.log_message(self.embeddings_output, "🔍 Calculating total embeddings across all files...")
+            self.embedding_progress_label.config(text="🔍 Calculating total embeddings...")
+            
+            for filename in pubmed_files:
+                file_path = os.path.join(pubmed_dir, filename)
+                try:
+                    # Count embeddings in this file
+                    file_embeddings = 0
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            if line.strip():
+                                paper = json.loads(line)
+                                title = paper.get('title', '')
+                                abstract = paper.get('abstract', '')
+                                full_text = f"{title}\n\n{abstract}" if abstract else title
+                                
+                                # Import chunk_paragraphs function
+                                sys.path.append('src/scrapers')
+                                from pubmed_scraper_json import chunk_paragraphs
+                                paragraphs = chunk_paragraphs(full_text)
+                                file_embeddings += len([para for para in paragraphs if para and para.strip()])
+                    
+                    file_embedding_counts[filename] = file_embeddings
+                    total_expected_embeddings += file_embeddings
+                    
+                except Exception as e:
+                    self.log_message(self.embeddings_output, f"⚠️  Error calculating embeddings for {filename}: {e}")
+                    file_embedding_counts[filename] = 0
+            
+            self.log_message(self.embeddings_output, f"📊 Total expected embeddings: {total_expected_embeddings}")
+            
+            # Set up progress bar for embeddings
+            self.embedding_progress_bar['maximum'] = total_expected_embeddings
+            self.embedding_progress_bar['value'] = 0
+            self.embedding_progress_label.config(text="🚀 Generating Embeddings...")
+            
+            processed_files = 0
+            successful_files = 0
+            total_processed_embeddings = 0
+            
+            for i, filename in enumerate(pubmed_files):
+                file_path = os.path.join(pubmed_dir, filename)
+                file_size = os.path.getsize(file_path)
+                expected_embeddings = file_embedding_counts[filename]
+                
+                # Update progress info
+                files_left = total_files - i
+                self.embedding_file_info.config(text=f"📄 {filename} ({expected_embeddings:,} embeddings) | Files left: {files_left}")
+                self.log_message(self.embeddings_output, f"📚 Processing file {i+1}/{total_files}: {filename} ({expected_embeddings:,} embeddings)")
+                
+                # Create progress callback for this file
+                def create_progress_callback(file_start_embeddings):
+                    def progress_callback(current_embeddings, total_embeddings):
+                        # Update GUI progress bar
+                        self.embedding_progress_bar['value'] = file_start_embeddings + current_embeddings
+                        self.embedding_progress_label.config(text=f"🚀 Generating Embeddings: {file_start_embeddings + current_embeddings:,}/{total_expected_embeddings:,}")
+                        self.root.update_idletasks()
+                    return progress_callback
+                
+                # Process the file with progress callback
+                success = process_existing_pubmed_data(file_path, google_api_key, 
+                                                    progress_callback=create_progress_callback(total_processed_embeddings))
+                
+                if success:
+                    successful_files += 1
+                    total_processed_embeddings += expected_embeddings
+                    self.log_message(self.embeddings_output, f"✅ Successfully processed: {filename}")
+                else:
+                    self.log_message(self.embeddings_output, f"❌ Failed to process: {filename}")
+                
+                processed_files += 1
+            
+            # Final status
+            self.embedding_progress_label.config(text=f"✅ Completed: {total_processed_embeddings:,}/{total_expected_embeddings:,} embeddings")
+            self.embedding_file_info.config(text="")
+            
+            if successful_files > 0:
+                self.log_message(self.embeddings_output, f"✅ PubMed embedding generation completed! {total_processed_embeddings:,}/{total_expected_embeddings:,} embeddings processed")
+            else:
+                self.log_message(self.embeddings_output, "❌ PubMed embedding generation failed!")
+                
+        except Exception as e:
+            self.log_message(self.embeddings_output, f"❌ Error in PubMed embedding generation: {e}")
+            self.embedding_progress_label.config(text="❌ Error occurred")
+            self.embedding_file_info.config(text="")
+    
+    def run_preprints_embedding_generation(self):
+        """Run preprints embedding generation with progress tracking."""
+        try:
+            self.embedding_progress_label.config(text="📄 Checking Preprint Embeddings...")
+            self.embedding_progress_bar['maximum'] = 100
+            self.embedding_progress_bar['value'] = 0
+            
+            self.log_message(self.embeddings_output, "📄 Preprint embeddings are generated during the scraping process")
+            self.log_message(self.embeddings_output, "💡 Run the 'Preprints Only' scraper to generate preprint embeddings")
+            
+            # Check if preprints embeddings exist
+            xrvix_dir = "data/embeddings/xrvix_embeddings"
+            if os.path.exists(xrvix_dir):
+                self.embedding_progress_bar['value'] = 50
+                self.embedding_file_info.config(text="🔍 Scanning preprint directories...")
+                self.root.update_idletasks()
+                
+                batch_files = []
+                for subdir in ['biorxiv', 'medrxiv']:
+                    subdir_path = os.path.join(xrvix_dir, subdir)
+                    if os.path.exists(subdir_path):
+                        batch_files.extend([f for f in os.listdir(subdir_path) if f.startswith('batch_')])
+                
+                self.embedding_progress_bar['value'] = 100
+                
+                if batch_files:
+                    self.log_message(self.embeddings_output, f"✅ Found {len(batch_files)} preprint embedding batch files")
+                    self.log_message(self.embeddings_output, "💡 Preprint embeddings are already available for loading")
+                    self.embedding_progress_label.config(text=f"✅ Found {len(batch_files)} preprint batch files")
+                    self.embedding_file_info.config(text="Preprint embeddings ready for loading")
+                else:
+                    self.log_message(self.embeddings_output, "❌ No preprint embedding batch files found")
+                    self.log_message(self.embeddings_output, "💡 Run the 'Preprints Only' scraper first")
+                    self.embedding_progress_label.config(text="❌ No preprint embeddings found")
+                    self.embedding_file_info.config(text="Run 'Preprints Only' scraper first")
+            else:
+                self.log_message(self.embeddings_output, "❌ No xrvix embeddings directory found")
+                self.log_message(self.embeddings_output, "💡 Run the 'Preprints Only' scraper first")
+                self.embedding_progress_label.config(text="❌ No xrvix directory found")
+                self.embedding_file_info.config(text="Run 'Preprints Only' scraper first")
+                
+        except Exception as e:
+            self.log_message(self.embeddings_output, f"❌ Error checking preprint embeddings: {e}")
+            self.embedding_progress_label.config(text="❌ Error occurred")
+            self.embedding_file_info.config(text="")
+    
+    def run_all_embedding_generation(self):
+        """Run embedding generation for all sources with progress tracking."""
+        try:
+            self.embedding_progress_label.config(text="🔄 Processing All Sources...")
+            self.embedding_progress_bar['maximum'] = 100
+            self.embedding_progress_bar['value'] = 0
+            
+            self.log_message(self.embeddings_output, "🔄 Running embedding generation for all sources...")
+            
+            # First run PubMed embeddings
+            self.log_message(self.embeddings_output, "📚 Step 1: Generating PubMed embeddings...")
+            self.embedding_file_info.config(text="📚 Processing PubMed files...")
+            self.root.update_idletasks()
+            
+            self.run_pubmed_embedding_generation()
+            
+            # Update progress
+            self.embedding_progress_bar['value'] = 50
+            self.root.update_idletasks()
+            
+            # Then check preprints
+            self.log_message(self.embeddings_output, "📄 Step 2: Checking preprint embeddings...")
+            self.embedding_file_info.config(text="📄 Checking preprint embeddings...")
+            self.root.update_idletasks()
+            
+            self.run_preprints_embedding_generation()
+            
+            # Final progress
+            self.embedding_progress_bar['value'] = 100
+            self.embedding_progress_label.config(text="✅ All-source processing completed!")
+            self.embedding_file_info.config(text="All sources processed successfully")
+            
+            self.log_message(self.embeddings_output, "✅ All-source embedding generation completed!")
+            
+        except Exception as e:
+            self.log_message(self.embeddings_output, f"❌ Error in all-source embedding generation: {e}")
+            self.embedding_progress_label.config(text="❌ Error occurred")
+            self.embedding_file_info.config(text="")
             
     # GUI Methods for Vector Database Management
     
@@ -2713,7 +3036,8 @@ STEP 5: Analyze Results
         self.update_status("Loading embeddings into ChromaDB...")
         
         try:
-            self.log_message(self.load_output, "Loading embeddings into ChromaDB...")
+            source = self.load_source_var.get()
+            self.log_message(self.load_output, f"Loading embeddings into ChromaDB for: {source}")
             self.log_message(self.load_output, "="*60)
             
             # Initialize ChromaDB manager
@@ -2739,35 +3063,57 @@ STEP 5: Analyze Results
             
             total_loaded = 0
             
-            # Load PubMed embeddings
-            pubmed_path = "data/embeddings/xrvix_embeddings/pubmed_embeddings.json"
-            if os.path.exists(pubmed_path):
-                self.log_message(self.load_output, "🔄 Loading PubMed embeddings...")
-                pubmed_data = manager.load_embeddings_from_json(pubmed_path)
-                if pubmed_data:
-                    if manager.add_embeddings_to_collection(pubmed_data, "pubmed"):
-                        total_loaded += len(pubmed_data.get('embeddings', []))
-                        self.log_message(self.load_output, f"✅ Loaded {len(pubmed_data.get('embeddings', []))} PubMed embeddings")
+            if source in ["all", "pubmed"]:
+                # Load PubMed embeddings
+                pubmed_path = "data/embeddings/xrvix_embeddings/pubmed_embeddings.json"
+                if os.path.exists(pubmed_path):
+                    self.log_message(self.load_output, "🔄 Loading PubMed embeddings...")
+                    pubmed_data = manager.load_embeddings_from_json(pubmed_path)
+                    if pubmed_data:
+                        if manager.add_embeddings_to_collection(pubmed_data, "pubmed"):
+                            total_loaded += len(pubmed_data.get('embeddings', []))
+                            self.log_message(self.load_output, f"✅ Loaded {len(pubmed_data.get('embeddings', []))} PubMed embeddings")
+                else:
+                    self.log_message(self.load_output, "⚠️ No PubMed embeddings found")
             
-            # Load all embeddings from xrvix directory (auto-detects all sources)
-            xrvix_path = "data/embeddings/xrvix_embeddings"
-            if os.path.exists(xrvix_path):
-                self.log_message(self.load_output, "🔄 Loading all embeddings from xrvix directory (auto-detecting sources)...")
-                if manager.add_embeddings_from_directory(xrvix_path, db_batch_size=DB_BATCH_SIZE):
-                    stats = manager.get_collection_stats()
-                    total_docs = stats.get('total_documents', 0)
-                    self.log_message(self.load_output, f"✅ Loaded all embeddings (total documents: {total_docs})")
-                    total_loaded = total_docs
+            if source in ["all", "preprints"]:
+                # Load preprint embeddings (biorxiv, medrxiv)
+                xrvix_path = "data/embeddings/xrvix_embeddings"
+                if os.path.exists(xrvix_path):
+                    self.log_message(self.load_output, "🔄 Loading preprint embeddings (BioRxiv + MedRxiv)...")
+                    # Load only preprint sources
+                    preprint_sources = ['biorxiv', 'medrxiv']
+                    if manager.add_embeddings_from_directory(xrvix_path, sources=preprint_sources, db_batch_size=DB_BATCH_SIZE):
+                        stats = manager.get_collection_stats()
+                        total_docs = stats.get('total_documents', 0)
+                        self.log_message(self.load_output, f"✅ Loaded preprint embeddings (total documents: {total_docs})")
+                        total_loaded = total_docs
+                else:
+                    self.log_message(self.load_output, "⚠️ No preprint embeddings found")
             
-            # Load Semantic Scholar API embeddings
-            semantic_path = "data/embeddings/xrvix_embeddings/semantic_scholar"
-            if os.path.exists(semantic_path):
-                self.log_message(self.load_output, "🔄 Loading Semantic Scholar API embeddings...")
-                if manager.add_embeddings_from_directory(semantic_path, db_batch_size=DB_BATCH_SIZE):
-                    stats = manager.get_collection_stats()
-                    total_docs = stats.get('total_documents', 0)
-                    self.log_message(self.load_output, f"✅ Loaded Semantic Scholar API embeddings (total documents: {total_docs})")
-                    total_loaded = total_docs
+            if source in ["all", "semantic"]:
+                # Load Semantic Scholar API embeddings
+                semantic_path = "data/embeddings/xrvix_embeddings/semantic_scholar"
+                if os.path.exists(semantic_path):
+                    self.log_message(self.load_output, "🔄 Loading Semantic Scholar API embeddings...")
+                    if manager.add_embeddings_from_directory(semantic_path, db_batch_size=DB_BATCH_SIZE):
+                        stats = manager.get_collection_stats()
+                        total_docs = stats.get('total_documents', 0)
+                        self.log_message(self.load_output, f"✅ Loaded Semantic Scholar API embeddings (total documents: {total_docs})")
+                        total_loaded = total_docs
+                else:
+                    self.log_message(self.load_output, "⚠️ No Semantic Scholar embeddings found")
+            
+            if source == "all":
+                # Load all embeddings from xrvix directory (auto-detects all sources)
+                xrvix_path = "data/embeddings/xrvix_embeddings"
+                if os.path.exists(xrvix_path):
+                    self.log_message(self.load_output, "🔄 Loading all embeddings from xrvix directory (auto-detecting sources)...")
+                    if manager.add_embeddings_from_directory(xrvix_path, db_batch_size=DB_BATCH_SIZE):
+                        stats = manager.get_collection_stats()
+                        total_docs = stats.get('total_documents', 0)
+                        self.log_message(self.load_output, f"✅ Loaded all embeddings (total documents: {total_docs})")
+                        total_loaded = total_docs
             
             if total_loaded == 0:
                 self.log_message(self.load_output, "⚠️ No data was loaded. Make sure you have processed some data first.")

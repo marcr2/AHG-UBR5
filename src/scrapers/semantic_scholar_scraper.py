@@ -48,7 +48,8 @@ class SemanticScholarScraper:
             api_keys: Dictionary containing API keys for different services
         """
         self.api_keys = api_keys or {}
-        self.embeddings_dir = "data/embeddings/xrvix_embeddings"
+        self.embeddings_dir = "data/embeddings/semantic_scholar"
+        self.scraped_data_dir = "data/scraped_data/semantic_scholar"
         self.papers_data = []
         self.processed_dois = set()
         
@@ -880,6 +881,8 @@ class SemanticScholarScraper:
         logger.info(f"🔍 Generating embeddings for {len(papers)} papers")
         
         papers_with_embeddings = []
+        current_batch = []
+        batch_num = 0
         
         for i, paper in enumerate(tqdm(papers, desc="Generating embeddings")):
             try:
@@ -893,6 +896,15 @@ class SemanticScholarScraper:
                     paper["embedding"] = embedding
                     paper["embedding_text"] = text_for_embedding
                     papers_with_embeddings.append(paper)
+                    
+                    # Add to batch and save when full
+                    current_batch, batch_num, batch_file = self.save_embedding_realtime(
+                        paper, current_batch, batch_num, batch_size=10
+                    )
+                    
+                    # Print progress every 10 papers
+                    if len(papers_with_embeddings) % 10 == 0:
+                        logger.info(f"💾 Processed {len(papers_with_embeddings)} papers so far...")
                 
                 # Rate limiting
                 time.sleep(self.rate_limit_delay)
@@ -900,6 +912,11 @@ class SemanticScholarScraper:
             except Exception as e:
                 logger.error(f"❌ Error generating embedding for paper {i}: {e}")
                 continue
+        
+        # Save any remaining papers in the current batch
+        if current_batch:
+            batch_file = self.save_batch_semantic_scholar(current_batch, batch_num)
+            logger.info(f"💾 Saved final Semantic Scholar batch {batch_num:04d} with {len(current_batch)} papers")
         
         logger.info(f"✅ Generated embeddings for {len(papers_with_embeddings)} papers")
         return papers_with_embeddings
@@ -1034,6 +1051,102 @@ class SemanticScholarScraper:
             ]
         }
         
+        with open(metadata_file, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
+
+    def save_batch_semantic_scholar(self, batch_data, batch_num):
+        """Save a batch of Semantic Scholar embeddings to a file"""
+        # Ensure directory exists
+        os.makedirs(self.embeddings_dir, exist_ok=True)
+        
+        batch_file = os.path.join(self.embeddings_dir, f"batch_{batch_num:04d}.json")
+        
+        batch_content = {
+            "source": "semantic_scholar",
+            "batch_num": batch_num,
+            "timestamp": datetime.now().isoformat(),
+            "papers": batch_data,
+            "stats": {
+                "total_papers": len(batch_data)
+            }
+        }
+        
+        with open(batch_file, 'w', encoding='utf-8') as f:
+            json.dump(batch_content, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"💾 Saved Semantic Scholar batch {batch_num:04d} with {len(batch_data)} papers")
+        return batch_file
+
+    def save_embedding_realtime(self, paper: Dict, current_batch: List, batch_num: int, batch_size: int = 10):
+        """
+        Add a paper to the current batch and save when full.
+        
+        Args:
+            paper: Paper dictionary with embedding
+            current_batch: Current batch list
+            batch_num: Current batch number
+            batch_size: Size of batch before saving
+        """
+        try:
+            # Add paper to current batch
+            current_batch.append(paper)
+            
+            # Save batch if it reaches the size limit
+            if len(current_batch) >= batch_size:
+                batch_file = self.save_batch_semantic_scholar(current_batch, batch_num)
+                # Reset batch
+                current_batch = []
+                batch_num += 1
+                return current_batch, batch_num, batch_file
+            else:
+                return current_batch, batch_num, None
+            
+        except Exception as e:
+            logger.error(f"❌ Error saving paper in real-time: {e}")
+            return current_batch, batch_num, None
+
+    def _update_metadata_realtime(self, source_dir: str, paper: Dict, source: str):
+        """Update metadata file in real-time"""
+        metadata_file = os.path.join(source_dir, "metadata.json")
+        
+        # Load existing metadata or create new
+        if os.path.exists(metadata_file):
+            try:
+                with open(metadata_file, 'r', encoding='utf-8') as f:
+                    metadata = json.load(f)
+            except (json.JSONDecodeError, FileNotFoundError):
+                metadata = {
+                    "source": source,
+                    "total_papers": 0,
+                    "created_at": datetime.now().isoformat(),
+                    "embedding_model": "text-embedding-004",
+                    "papers": []
+                }
+        else:
+            metadata = {
+                "source": source,
+                "total_papers": 0,
+                "created_at": datetime.now().isoformat(),
+                "embedding_model": "text-embedding-004",
+                "papers": []
+            }
+        
+        # Add new paper to metadata
+        paper_metadata = {
+            "title": paper.get("title", ""),
+            "doi": paper.get("doi", ""),
+            "source": paper.get("source", ""),
+            "year": paper.get("year", ""),
+            "filename": self._create_filename(paper)
+        }
+        
+        # Check if paper already exists (avoid duplicates)
+        existing_papers = [p for p in metadata["papers"] if p.get("doi") == paper_metadata.get("doi")]
+        if not existing_papers:
+            metadata["papers"].append(paper_metadata)
+            metadata["total_papers"] = len(metadata["papers"])
+        
+        # Save updated metadata
         with open(metadata_file, 'w', encoding='utf-8') as f:
             json.dump(metadata, f, indent=2, ensure_ascii=False)
         

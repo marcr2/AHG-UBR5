@@ -529,15 +529,10 @@ def run_journal_articles_only():
     # Step 1: Process PubMed
     print("\n📚 Step 1/2: Processing PubMed...")
     try:
-        # Ask user for max results for PubMed
         print(f"   Using keywords: {pubmed_keywords}")
-        print("   🔢 PubMed Results Configuration:")
-        max_results = get_pubmed_max_results()
-        if max_results is None:
-            print("❌ PubMed processing cancelled by user")
-            return
+        print("   🔍 Searching until no more unique papers found for each keyword")
         
-        process_pubmed(max_results=max_results)
+        process_pubmed()
         print("✅ PubMed processing completed successfully!")
         success_count += 1
     except Exception as e:
@@ -621,23 +616,137 @@ def run_preprints_only():
         print(f"❌ Preprints processing failed: {e}")
         print("💡 Make sure you have an internet connection for downloading dumps")
 
+def cleanup_autosave_files(pubmed_dir):
+    """Clean up autosave files after embedding generation is complete."""
+    try:
+        import glob
+        
+        # Find all autosave files
+        autosave_pattern = os.path.join(pubmed_dir, "pubmed_autosave_*.jsonl")
+        autosave_files = glob.glob(autosave_pattern)
+        
+        if autosave_files:
+            print(f"\n🧹 Found {len(autosave_files)} autosave files:")
+            for autosave_file in autosave_files:
+                file_size = os.path.getsize(autosave_file)
+                print(f"   - {os.path.basename(autosave_file)} ({file_size:,} bytes)")
+            
+            print("💡 Note: Autosave files are intermediate files created during scraping.")
+            print("   They're automatically cleaned up since the final data is preserved.")
+            
+            # Automatically clean up autosave files (they're just intermediate files)
+            print("🧹 Automatically cleaning up autosave files...")
+            
+            cleaned_count = 0
+            for autosave_file in autosave_files:
+                try:
+                    os.remove(autosave_file)
+                    cleaned_count += 1
+                    print(f"   ✅ Deleted: {os.path.basename(autosave_file)}")
+                except Exception as e:
+                    print(f"   ⚠️  Could not delete {os.path.basename(autosave_file)}: {e}")
+            
+            print(f"🧹 Cleaned up {cleaned_count} autosave files")
+        else:
+            print("🧹 No autosave files found to clean up")
+            
+    except Exception as e:
+        print(f"⚠️  Error during autosave cleanup: {e}")
+
 def generate_embeddings():
     """Generate embeddings for processed data."""
     print("\n🔄 Starting Embedding Generation...")
     print("="*60)
     
     try:
-        # This would typically involve running the embedding generation process
-        # For now, we'll check if data exists and provide guidance
-        if os.path.exists("data/embeddings/xrvix_embeddings"):
-            print("✅ Embeddings directory exists")
-            print("💡 Embeddings are generated during the scraping process")
-            print("   If you need to regenerate embeddings, run the scraping options first")
-        else:
-            print("❌ No embeddings found")
-            print("💡 Run scraping options (1-3) first to generate embeddings")
+        # Check if we have PubMed data to process
+        pubmed_files = []
+        pubmed_dir = "data/scraped_data/pubmed"
+        if os.path.exists(pubmed_dir):
+            pubmed_files = [f for f in os.listdir(pubmed_dir) if f.endswith('.jsonl')]
+        
+        if not pubmed_files:
+            print("❌ No PubMed data files found")
+            print("💡 Run PubMed scraping (option 1) first to generate data")
+            return
+        
+        print(f"📚 Found {len(pubmed_files)} PubMed data files:")
+        for file in pubmed_files:
+            file_path = os.path.join(pubmed_dir, file)
+            file_size = os.path.getsize(file_path)
+            print(f"   - {file} ({file_size:,} bytes)")
+        
+        # Check if Google API key is available
+        keys_path = "config/keys.json"
+        if not os.path.exists(keys_path):
+            print("❌ No API keys found at config/keys.json")
+            print("💡 Please ensure your Google API key is configured")
+            return
+        
+        # Load API keys
+        with open(keys_path, 'r') as f:
+            keys = json.load(f)
+        
+        google_api_key = keys.get("GOOGLE_API_KEY")
+        if not google_api_key:
+            print("❌ GOOGLE_API_KEY not found in keys.json")
+            print("💡 Please add your Google API key to config/keys.json")
+            return
+        
+        print("✅ Google API key found")
+        
+        # Ask user which file to process
+        print("\n📋 Available PubMed files:")
+        for i, file in enumerate(pubmed_files, 1):
+            print(f"   {i}. {file}")
+        
+        try:
+            choice = input(f"\nSelect file to process (1-{len(pubmed_files)}) or 'all' for all files: ").strip()
+            
+            if choice.lower() == 'all':
+                selected_files = pubmed_files
+            else:
+                file_index = int(choice) - 1
+                if 0 <= file_index < len(pubmed_files):
+                    selected_files = [pubmed_files[file_index]]
+                else:
+                    print("❌ Invalid selection")
+                    return
+        except ValueError:
+            print("❌ Invalid input")
+            return
+        
+        print(f"\n🚀 Processing {len(selected_files)} file(s)...")
+        
+        # Import and run the PubMed embedding generation
+        import sys
+        sys.path.append('src/scrapers')
+        from pubmed_scraper_json import process_existing_pubmed_data
+        
+        # Run the embedding generation for each selected file
+        for file in selected_files:
+            print(f"\n📄 Processing {file}...")
+            file_path = os.path.join(pubmed_dir, file)
+            
+            # Process the existing data file
+            success = process_existing_pubmed_data(file_path, google_api_key)
+            
+            if success:
+                print(f"✅ Successfully processed {file}")
+            else:
+                print(f"❌ Failed to process {file}")
+        
+        print("\n✅ Embedding generation completed!")
+        
+        # Clean up autosave files
+        cleanup_autosave_files(pubmed_dir)
+        
+        print("💡 You can now load embeddings into ChromaDB (option 5)")
+        
     except Exception as e:
-        print(f"❌ Error checking embeddings: {e}")
+        print(f"❌ Error generating embeddings: {e}")
+        import traceback
+        traceback.print_exc()
 
 def load_embeddings():
     """Load embeddings into ChromaDB."""
