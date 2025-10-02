@@ -9,7 +9,7 @@
   "endpoints": {
     "ncbi_eutils": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
     "semantic_scholar": "https://api.semanticscholar.org/graph/v1/paper/search",
-    "google_api": "https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent"
+    "google_api": "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
   },
   "offline_mode": false,
   "posthog_disabled": true,

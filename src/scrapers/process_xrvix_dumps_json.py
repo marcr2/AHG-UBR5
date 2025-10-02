@@ -1413,14 +1413,8 @@ except ImportError:
     SAVE_INTERVAL = 1000
     DUMPS = ["biorxiv", "medrxiv"]
 
-# Set dump root based on paperscraper availability
-if PAPERSCRAPER_AVAILABLE:
-    try:
-        DUMP_ROOT = pkg_resources.resource_filename("paperscraper", "server_dumps")
-    except Exception:
-        DUMP_ROOT = "data/scraped_data/xrvix/paperscraper_dumps"  # Fallback to local directory
-else:
-    DUMP_ROOT = "data/scraped_data/xrvix/paperscraper_dumps"  # Use local directory when paperscraper not available
+# Set dump root to use our local directory for downloaded dumps
+DUMP_ROOT = "data/scraped_data/paperscraper_dumps/server_dumps"  # Use our local directory
 EMBEDDINGS_DIR = "data/embeddings/xrvix_embeddings"
 SCRAPED_DATA_DIR = "data/scraped_data/xrvix"
 
@@ -2862,14 +2856,18 @@ def main():
             source_dir = os.path.join(EMBEDDINGS_DIR, db)
             ensure_directory(source_dir)
 
-            # Find dump file
-            dump_paths = [
-                os.path.join(DUMP_ROOT, f)
-                for f in os.listdir(DUMP_ROOT)
-                if f.startswith(db)
-            ]
+            # Find dump file - look for files that start with the database name
+            dump_paths = []
+            if os.path.exists(DUMP_ROOT):
+                dump_paths = [
+                    os.path.join(DUMP_ROOT, f)
+                    for f in os.listdir(DUMP_ROOT)
+                    if f.startswith(db) and f.endswith('.jsonl')
+                ]
+            
             if not dump_paths:
-                logger.error(f"❌ No dump found for {db}, skipping.")
+                logger.error(f"❌ No dump found for {db} in {DUMP_ROOT}, skipping.")
+                logger.info(f"💡 Available files: {os.listdir(DUMP_ROOT) if os.path.exists(DUMP_ROOT) else 'Directory does not exist'}")
                 continue
 
             path = sorted(dump_paths, reverse=True)[0]

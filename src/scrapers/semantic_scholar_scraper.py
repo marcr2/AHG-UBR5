@@ -57,16 +57,34 @@ class SemanticScholarScraper:
         if not self.api_keys:
             self._load_api_keys()
         
+        # Get Semantic Scholar API key
+        self.semantic_scholar_api_key = self.api_keys.get("SEMANTIC_SCHOLAR_API_KEY")
+        if self.semantic_scholar_api_key:
+            logger.info("✅ Semantic Scholar API key found - using authenticated requests")
+        else:
+            logger.info("⚠️ No Semantic Scholar API key found - using unauthenticated requests (lower rate limits)")
+        
         # API endpoints and rate limiting
         self.semantic_scholar_base = "https://api.semanticscholar.org/v1"
         self.semantic_scholar_v2_base = "https://api.semanticscholar.org/graph/v1"
         self.scholarly_base = "https://scholar.google.com"
         
-        # Rate limiting configuration
-        self.rate_limit_delay = 1.0  # 1 second between requests (increased for better reliability)
+        # Rate limiting configuration - Adjust based on API key availability
+        if self.semantic_scholar_api_key:
+            # More aggressive rate limiting with API key
+            self.rate_limit_delay = 1.0  # 1 second between requests (with API key)
+            self.semantic_scholar_rate_limit = 1.0  # 1 second between Semantic Scholar requests
+            self.keyword_delay = 2.0  # 2 seconds between different keywords
+            logger.info("🚀 Using faster rate limiting with API key")
+        else:
+            # Conservative rate limiting without API key
+            self.rate_limit_delay = 3.0  # 3 seconds between requests (conservative)
+            self.semantic_scholar_rate_limit = 3.0  # 3 seconds between Semantic Scholar requests
+            self.keyword_delay = 5.0  # 5 seconds between different keywords
+            logger.info("🐌 Using conservative rate limiting without API key")
+        
         self.max_retries = 3
         self.timeout = 30
-        self.semantic_scholar_rate_limit = 2.0  # 2 seconds between Semantic Scholar requests
         
         # Note: Google Scholar removed due to CAPTCHA/rate limiting issues
         # Using Semantic Scholar as primary source (reliable, no CAPTCHA)
@@ -168,7 +186,7 @@ class SemanticScholarScraper:
         google_api_key = self.api_keys.get("GOOGLE_API_KEY")
         if google_api_key:
             try:
-                test_url = "https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent"
+                test_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
                 test_data = {"content": {"parts": [{"text": "test"}]}}
                 test_params = {"key": google_api_key}
                 response = requests.post(test_url, json=test_data, params=test_params, timeout=10)
@@ -242,11 +260,16 @@ class SemanticScholarScraper:
                     "fields": "paperId,title,abstract,venue,year,authors,referenceCount,citationCount,openAccessPdf,publicationDate,publicationTypes,fieldsOfStudy,publicationVenue,externalIds"
                 }
                 
+                # Prepare headers with API key if available
+                headers = {}
+                if self.semantic_scholar_api_key:
+                    headers["x-api-key"] = self.semantic_scholar_api_key
+                
                 # Add retry mechanism with exponential backoff
                 response = None
                 for attempt in range(self.max_retries):
                     try:
-                        response = requests.get(url, params=params, timeout=self.timeout)
+                        response = requests.get(url, params=params, headers=headers, timeout=self.timeout)
                         
                         # Check if response is valid
                         if response and response.content:
@@ -327,6 +350,7 @@ class SemanticScholarScraper:
                     
                 elif response.status_code == 429:
                     logger.warning("⚠️ Rate limit hit, waiting 60 seconds...")
+                    logger.info("💡 Consider using fewer keywords or longer delays to avoid rate limiting")
                     time.sleep(60)
                     continue
                 elif response.status_code == 403:
@@ -779,8 +803,8 @@ class SemanticScholarScraper:
                     keyword_pbar.update(1)
                     keyword_pbar.set_postfix({"papers_found": len(all_papers)})
                     
-                    # Rate limiting between keywords
-                    time.sleep(1)
+                    # Rate limiting between keywords - use conservative delay
+                    time.sleep(self.keyword_delay)
                     
                 except Exception as e:
                     logger.error(f"❌ Error processing keyword '{keyword}': {e}")
@@ -973,7 +997,7 @@ class SemanticScholarScraper:
             Embedding vector or None if failed
         """
         try:
-            url = "https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent"
+            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
             
             headers = {
                 "Content-Type": "application/json"
@@ -1240,11 +1264,13 @@ class SemanticScholarScraper:
                         "year": str(paper.get("year", "") or ""),
                         "citation_count": str(paper.get("citation_count", "0") or "0"),
                         "source": str(paper.get("source", "") or ""),
+                        "source_name": "semantic_scholar",  # Add source_name for ChromaDB manager
                         "is_preprint": str(paper.get("is_preprint", False) or False),
                         "publication_date": str(paper.get("publication_date", "") or ""),
                         "fields_of_study": safe_join_list(paper.get("fields_of_study", [])),
                         "publication_types": safe_join_list(paper.get("publication_types", [])),
-                        "abstract": str(paper.get("abstract", "") or "")[:1000]  # Limit length
+                        "abstract": str(paper.get("abstract", "") or "")[:1000],  # Limit length
+                        "added_at": str(datetime.now().isoformat())
                     }
                     
                     # Create unique ID
@@ -1304,7 +1330,7 @@ class SemanticScholarScraper:
                 return
             
             # Step 1: Search for papers
-            papers = self.search_ubr5_papers(max_papers=max_papers)
+            papers = self.search_papers(max_papers=max_papers)
             
             if not papers:
                 logger.warning("⚠️ No papers found, exiting")

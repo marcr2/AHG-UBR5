@@ -82,9 +82,9 @@ SCHOLARLY_CONFIG = {
 
 # --- RATE LIMITING ---
 RATE_LIMITING = {
-    "semantic_scholar_delay": 0.1,  # 100ms between requests
+    "semantic_scholar_delay": 3.0,  # 3 seconds between requests (conservative)
     "scholarly_delay": 0.2,         # 200ms between requests
-    "keyword_delay": 1.0,           # 1 second between search keywords
+    "keyword_delay": 5.0,           # 5 seconds between search keywords
     "embedding_delay": 0.1,         # 100ms between embedding requests
     "max_retries": 3,
     "timeout": 30,

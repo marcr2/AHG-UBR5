@@ -122,10 +122,11 @@ class ChromaDBManager:
         """
         Load embeddings from the new multi-file directory structure.
         Automatically detects all available sources by scanning directory structure.
+        Also checks for PubMed embeddings in the separate data/embeddings/pubmed/ directory.
         
         Args:
             embeddings_dir: Path to the embeddings directory
-            sources: List of sources to load (e.g., ['biorxiv', 'medrxiv']). If None, loads all sources.
+            sources: List of sources to load (e.g., ['biorxiv', 'medrxiv', 'pubmed']). If None, loads all sources.
             
         Returns:
             Dict containing metadata and source information
@@ -148,6 +149,16 @@ class ChromaDBManager:
         
         # Auto-detect all available sources by scanning directory structure
         detected_sources = self._detect_available_sources(embeddings_dir)
+        
+        # Also check for PubMed embeddings in the separate pubmed directory
+        pubmed_dir = os.path.join(os.path.dirname(embeddings_dir), "pubmed")
+        if os.path.exists(pubmed_dir):
+            # Check if PubMed directory contains batch files directly
+            pubmed_batch_files = glob.glob(os.path.join(pubmed_dir, "batch_*.json"))
+            if pubmed_batch_files:
+                # Add 'pubmed' to detected sources if batch files are found
+                detected_sources.append('pubmed')
+                logger.info(f"🔍 Detected PubMed embeddings in separate directory: {pubmed_dir} ({len(pubmed_batch_files)} batch files)")
         
         # Determine which sources to process
         if sources is None:
@@ -408,11 +419,23 @@ class ChromaDBManager:
         
         for source in sources:
             logger.info(f"🔄 Processing source: {source}")
-            source_dir = os.path.join(embeddings_dir, source)
             
-            if not os.path.exists(source_dir):
-                logger.warning(f"⚠️ Source directory not found: {source_dir}")
-                continue
+            # Check if this is PubMed source and handle special case
+            if source == "pubmed":
+                # PubMed embeddings are in a separate directory
+                pubmed_dir = os.path.join(os.path.dirname(embeddings_dir), "pubmed")
+                if os.path.exists(pubmed_dir):
+                    source_dir = pubmed_dir
+                    logger.info(f"📁 Found PubMed batch files in separate directory: {pubmed_dir}")
+                else:
+                    logger.warning(f"⚠️ PubMed directory not found: {pubmed_dir}")
+                    continue
+            else:
+                # Handle case where batch files are in a subdirectory
+                source_dir = os.path.join(embeddings_dir, source)
+                if not os.path.exists(source_dir):
+                    logger.warning(f"⚠️ Source directory not found: {source_dir}")
+                    continue
             
             # Get all batch files for this source
             batch_files = glob.glob(os.path.join(source_dir, "batch_*.json"))

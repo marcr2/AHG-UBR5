@@ -83,7 +83,7 @@ class NetworkConnectivityFix:
         endpoints = {
             'ncbi_eutils': 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi',
             'semantic_scholar': 'https://api.semanticscholar.org/graph/v1/paper/search',
-            'google_api': 'https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent',
+            'google_api': 'https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent',
             'posthog': 'https://us.i.posthog.com/batch/'
         }
         
@@ -109,7 +109,7 @@ class NetworkConnectivityFix:
                 'https://api.semanticscholar.org/v1/paper/search'
             ],
             'google_api': [
-                'https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent',
+                'https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent',
                 'https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedText'
             ]
         }
@@ -208,7 +208,7 @@ class NetworkConnectivityFix:
             "endpoints": {
                 "ncbi_eutils": "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi",
                 "semantic_scholar": "https://api.semanticscholar.org/graph/v1/paper/search",
-                "google_api": "https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent"
+                "google_api": "https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent"
             },
             "offline_mode": False,
             "posthog_disabled": True,

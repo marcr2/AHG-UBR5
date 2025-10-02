@@ -571,16 +571,13 @@ def run_preprints_only():
         dump_dir = "data/scraped_data/paperscraper_dumps"
         server_dumps_dir = os.path.join(dump_dir, "server_dumps")
         
-        # Check both old and new directory structures
+        # Check for dump files in the correct location
         biorxiv_dumps = []
         medrxiv_dumps = []
         
         if os.path.exists(server_dumps_dir):
-            biorxiv_dumps = [f for f in os.listdir(server_dumps_dir) if 'biorxiv' in f.lower()]
-            medrxiv_dumps = [f for f in os.listdir(server_dumps_dir) if 'medrxiv' in f.lower()]
-        elif os.path.exists(dump_dir):
-            biorxiv_dumps = [f for f in os.listdir(dump_dir) if f.startswith('biorxiv')]
-            medrxiv_dumps = [f for f in os.listdir(dump_dir) if f.startswith('medrxiv')]
+            biorxiv_dumps = [f for f in os.listdir(server_dumps_dir) if f.startswith('biorxiv') and f.endswith('.jsonl')]
+            medrxiv_dumps = [f for f in os.listdir(server_dumps_dir) if f.startswith('medrxiv') and f.endswith('.jsonl')]
         
         if not biorxiv_dumps and not medrxiv_dumps:
             print("❌ No preprint dumps found!")
@@ -776,11 +773,27 @@ def load_embeddings():
         
         total_loaded = 0
         
-        # Load PubMed embeddings
-        pubmed_path = "data/embeddings/xrvix_embeddings/pubmed_embeddings.json"
-        if os.path.exists(pubmed_path):
-            print("🔄 Loading PubMed embeddings...")
-            pubmed_data = manager.load_embeddings_from_json(pubmed_path)
+        # Load PubMed embeddings from batch files
+        pubmed_batch_dir = "data/embeddings/pubmed"
+        pubmed_single_file = "data/embeddings/xrvix_embeddings/pubmed_embeddings.json"
+        
+        # First try to load from batch files (newer format)
+        if os.path.exists(pubmed_batch_dir):
+            batch_files = [f for f in os.listdir(pubmed_batch_dir) if f.startswith("batch_") and f.endswith(".json")]
+            if batch_files:
+                print(f"🔄 Loading PubMed embeddings from {len(batch_files)} batch files...")
+                if manager.add_embeddings_from_directory(pubmed_batch_dir, sources=["pubmed"], db_batch_size=DB_BATCH_SIZE):
+                    stats = manager.get_collection_stats()
+                    total_docs = stats.get('total_documents', 0)
+                    print(f"✅ Loaded PubMed embeddings from batch files (total documents: {total_docs})")
+                    total_loaded = total_docs
+                else:
+                    print("❌ Failed to load PubMed embeddings from batch files")
+        
+        # Fallback to single file (legacy format)
+        elif os.path.exists(pubmed_single_file):
+            print("🔄 Loading PubMed embeddings from single file...")
+            pubmed_data = manager.load_embeddings_from_json(pubmed_single_file)
             if pubmed_data:
                 if manager.add_embeddings_to_collection(pubmed_data, "pubmed"):
                     total_loaded += len(pubmed_data.get('embeddings', []))

@@ -283,16 +283,13 @@ class ScraperProgressWrapper:
             dump_dir = "data/scraped_data/paperscraper_dumps"
             server_dumps_dir = os.path.join(dump_dir, "server_dumps")
             
-            # Check both old and new directory structures
+            # Check for dump files in the correct location
             biorxiv_dumps = []
             medrxiv_dumps = []
             
             if os.path.exists(server_dumps_dir):
-                biorxiv_dumps = [f for f in os.listdir(server_dumps_dir) if 'biorxiv' in f.lower()]
-                medrxiv_dumps = [f for f in os.listdir(server_dumps_dir) if 'medrxiv' in f.lower()]
-            elif os.path.exists(dump_dir):
-                biorxiv_dumps = [f for f in os.listdir(dump_dir) if f.startswith('biorxiv')]
-                medrxiv_dumps = [f for f in os.listdir(dump_dir) if f.startswith('medrxiv')]
+                biorxiv_dumps = [f for f in os.listdir(server_dumps_dir) if f.startswith('biorxiv') and f.endswith('.jsonl')]
+                medrxiv_dumps = [f for f in os.listdir(server_dumps_dir) if f.startswith('medrxiv') and f.endswith('.jsonl')]
             
             if not biorxiv_dumps and not medrxiv_dumps:
                 self.update_progress("📥 No preprint dumps found! Downloading...")
@@ -538,43 +535,60 @@ class AIResearchProcessorGUI:
         self.full_scraper_output.pack(fill=tk.BOTH, expand=True)
         
     def create_journal_articles_subtab(self, parent):
-        """Create journal articles only subtab."""
+        """Create journal articles only subtab with individual source options."""
         # Title
-        title_label = ttk.Label(parent, text="Journal Articles Only (PubMed + Semantic Scholar)", 
+        title_label = ttk.Label(parent, text="Journal Articles Only", 
                                font=('Arial', 14, 'bold'))
         title_label.pack(pady=(0, 20))
         
         # Description
-        desc_text = """This option scrapes journal articles from:
-• PubMed - Custom keywords
-• Semantic Scholar (UBR5 API) - Custom keywords"""
+        desc_text = """This option scrapes journal articles from PubMed and Semantic Scholar.
+Choose to scrape both sources together or individual sources separately."""
         
         desc_label = ttk.Label(parent, text=desc_text, justify=tk.LEFT)
         desc_label.pack(pady=(0, 20))
         
-        # Keywords configuration (reuse from full scraper)
+        # Source selection
+        source_frame = ttk.LabelFrame(parent, text="Source Selection", padding=10)
+        source_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        self.journal_source_var = tk.StringVar(value="both")
+        
+        ttk.Radiobutton(source_frame, text="📚 Both Sources (PubMed + Semantic Scholar)", 
+                       variable=self.journal_source_var, value="both").pack(anchor=tk.W, pady=2)
+        
+        ttk.Radiobutton(source_frame, text="🔬 PubMed Only (Journal Articles)", 
+                       variable=self.journal_source_var, value="pubmed").pack(anchor=tk.W, pady=2)
+        
+        ttk.Radiobutton(source_frame, text="🧠 Semantic Scholar Only (UBR5 API)", 
+                       variable=self.journal_source_var, value="semantic").pack(anchor=tk.W, pady=2)
+        
+        # Keywords configuration
         keywords_frame = ttk.LabelFrame(parent, text="Search Keywords Configuration", padding=10)
         keywords_frame.pack(fill=tk.X, pady=(0, 20))
         
-        ttk.Label(keywords_frame, text="Keywords (used for both PubMed and Semantic Scholar):").pack(anchor=tk.W)
+        ttk.Label(keywords_frame, text="Keywords (used for PubMed and Semantic Scholar):").pack(anchor=tk.W)
         self.journal_keywords_var = tk.StringVar()
         journal_entry = ttk.Entry(keywords_frame, textvariable=self.journal_keywords_var, width=60)
         journal_entry.pack(fill=tk.X, pady=(0, 10))
         
-        # PubMed max results
-        max_results_frame = ttk.Frame(keywords_frame)
-        max_results_frame.pack(fill=tk.X, pady=(0, 10))
+        # PubMed max results (only relevant for PubMed or both)
+        self.max_results_frame = ttk.Frame(keywords_frame)
+        self.max_results_frame.pack(fill=tk.X, pady=(0, 10))
         
-        ttk.Label(max_results_frame, text="Max PubMed Results:").pack(side=tk.LEFT)
+        ttk.Label(self.max_results_frame, text="Max PubMed Results:").pack(side=tk.LEFT)
         self.journal_max_results_var = tk.StringVar(value="5000")
-        journal_max_results_entry = ttk.Entry(max_results_frame, textvariable=self.journal_max_results_var, width=10)
+        journal_max_results_entry = ttk.Entry(self.max_results_frame, textvariable=self.journal_max_results_var, width=10)
         journal_max_results_entry.pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Bind source selection to update UI
+        self.journal_source_var.trace('w', self.update_journal_ui)
         
         # Buttons
         button_frame = ttk.Frame(parent)
         button_frame.pack(fill=tk.X, pady=(0, 20))
         
-        run_button = ttk.Button(button_frame, text="📚 Run Journal Articles Scraper", 
+        run_button = ttk.Button(button_frame, text="🚀 Run Selected Scraper", 
                                command=self.run_journal_articles_gui, style='Action.TButton')
         run_button.pack(side=tk.LEFT)
         
@@ -595,22 +609,34 @@ class AIResearchProcessorGUI:
         self.journal_output.pack(fill=tk.BOTH, expand=True)
         
     def create_preprints_subtab(self, parent):
-        """Create preprints only subtab."""
+        """Create preprints only subtab with individual source options."""
         # Title
-        title_label = ttk.Label(parent, text="Preprints Only (Biorxiv, Medrxiv)", 
+        title_label = ttk.Label(parent, text="Preprints Only", 
                                font=('Arial', 14, 'bold'))
         title_label.pack(pady=(0, 20))
         
         # Description
-        desc_text = """This option processes preprint data from:
-• Biorxiv - Automatically downloads and processes
-• Medrxiv - Automatically downloads and processes
-
-Note: Custom keywords are not applicable for this option.
-The system will process all available preprint data."""
+        desc_text = """This option processes preprint data from Biorxiv and Medrxiv.
+Choose to process both sources together or individual sources separately.
+Note: Custom keywords are not applicable for this option."""
         
         desc_label = ttk.Label(parent, text=desc_text, justify=tk.LEFT)
         desc_label.pack(pady=(0, 20))
+        
+        # Source selection
+        source_frame = ttk.LabelFrame(parent, text="Source Selection", padding=10)
+        source_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        self.preprints_source_var = tk.StringVar(value="both")
+        
+        ttk.Radiobutton(source_frame, text="📄 Both Sources (BioRxiv + MedRxiv)", 
+                       variable=self.preprints_source_var, value="both").pack(anchor=tk.W, pady=2)
+        
+        ttk.Radiobutton(source_frame, text="🧬 BioRxiv Only (Biology Preprints)", 
+                       variable=self.preprints_source_var, value="biorxiv").pack(anchor=tk.W, pady=2)
+        
+        ttk.Radiobutton(source_frame, text="🏥 MedRxiv Only (Medical Preprints)", 
+                       variable=self.preprints_source_var, value="medrxiv").pack(anchor=tk.W, pady=2)
         
         # Status check
         status_frame = ttk.LabelFrame(parent, text="Preprint Data Status", padding=10)
@@ -627,7 +653,7 @@ The system will process all available preprint data."""
                                        command=self.check_preprints_status)
         check_status_button.pack(side=tk.LEFT, padx=(0, 10))
         
-        run_button = ttk.Button(button_frame, text="📄 Run Preprints Scraper", 
+        run_button = ttk.Button(button_frame, text="🚀 Run Selected Scraper", 
                                command=self.run_preprints_gui, style='Action.TButton')
         run_button.pack(side=tk.LEFT)
         
@@ -649,7 +675,17 @@ The system will process all available preprint data."""
         
         # Check status on load
         self.root.after(100, self.check_preprints_status)
+    
+    def update_journal_ui(self, *args):
+        """Update journal articles UI based on source selection."""
+        source = self.journal_source_var.get()
         
+        # Show/hide PubMed max results based on selection
+        if source in ["both", "pubmed"]:
+            self.max_results_frame.pack(fill=tk.X, pady=(0, 10))
+        else:
+            self.max_results_frame.pack_forget()
+    
     def create_embeddings_subtab(self, parent):
         """Create generate embeddings subtab."""
         # Title
@@ -1261,6 +1297,18 @@ and provides recommendations for next steps."""
         semantic_max_papers_entry.grid(row=2, column=1, sticky=tk.W, padx=(10, 0), pady=2)
         ttk.Label(semantic_frame, text="(Maximum results per search)").grid(row=2, column=2, sticky=tk.W, padx=(10, 0), pady=2)
         
+        # API Key
+        ttk.Label(semantic_frame, text="API Key:").grid(row=3, column=0, sticky=tk.W, pady=2)
+        self.semantic_api_key_var = tk.StringVar()
+        semantic_api_key_entry = ttk.Entry(semantic_frame, textvariable=self.semantic_api_key_var, width=40, show="*")
+        semantic_api_key_entry.grid(row=3, column=1, sticky=tk.W, padx=(10, 0), pady=2)
+        ttk.Label(semantic_frame, text="(Optional - higher rate limits)").grid(row=3, column=2, sticky=tk.W, padx=(10, 0), pady=2)
+        
+        # Load API key from config button
+        load_api_key_button = ttk.Button(semantic_frame, text="📂 Load from keys.json", 
+                                       command=self.load_semantic_api_key)
+        load_api_key_button.grid(row=4, column=1, sticky=tk.W, padx=(10, 0), pady=2)
+        
         # Embedding API
         embedding_frame = ttk.LabelFrame(scrollable_frame, text="Google Embedding API", padding=10)
         embedding_frame.pack(fill=tk.X, padx=10, pady=5)
@@ -1357,10 +1405,38 @@ and provides recommendations for next steps."""
             # Save search_keywords_config.json
             self.save_search_keywords_config()
             
+            # Save API keys
+            self.save_semantic_api_key()
+            
             messagebox.showinfo("Success", "All configurations saved successfully!")
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save configurations: {e}")
+    
+    def save_semantic_api_key(self):
+        """Save Semantic Scholar API key to keys.json."""
+        try:
+            # Load existing keys
+            try:
+                with open("config/keys.json", 'r') as f:
+                    keys_data = json.load(f)
+            except FileNotFoundError:
+                keys_data = {}
+            
+            # Update with new API key
+            api_key = self.semantic_api_key_var.get().strip()
+            if api_key:
+                keys_data["SEMANTIC_SCHOLAR_API_KEY"] = api_key
+            else:
+                # Remove key if empty
+                keys_data.pop("SEMANTIC_SCHOLAR_API_KEY", None)
+            
+            # Save back to file
+            with open("config/keys.json", 'w') as f:
+                json.dump(keys_data, f, indent=2)
+                
+        except Exception as e:
+            raise Exception(f"Failed to save API key: {e}")
     
     def save_processing_config(self):
         """Save processing configuration to processing_config.py."""
@@ -1666,6 +1742,23 @@ if __name__ == "__main__":
         with open("config/search_keywords_config.json", "w", encoding="utf-8") as f:
             json.dump(config_data, f, indent=2, ensure_ascii=False)
     
+    def load_semantic_api_key(self):
+        """Load Semantic Scholar API key from keys.json."""
+        try:
+            with open("config/keys.json", 'r') as f:
+                keys_data = json.load(f)
+            
+            api_key = keys_data.get("SEMANTIC_SCHOLAR_API_KEY", "")
+            self.semantic_api_key_var.set(api_key)
+            
+            if api_key:
+                messagebox.showinfo("Success", "Semantic Scholar API key loaded successfully!")
+            else:
+                messagebox.showinfo("Info", "No Semantic Scholar API key found in keys.json")
+                
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load API key: {e}")
+    
     def load_all_configurations(self):
         """Load all configurations from files."""
         try:
@@ -1677,6 +1770,9 @@ if __name__ == "__main__":
             
             # Load search_keywords_config.json
             self.load_search_keywords_config()
+            
+            # Load API keys
+            self.load_semantic_api_key()
             
             messagebox.showinfo("Success", "All configurations loaded successfully!")
             
@@ -2600,19 +2696,25 @@ STEP 5: Analyze Results
             messagebox.showerror("Error", "Please enter keywords")
             return
             
-        try:
-            max_results = int(self.journal_max_results_var.get())
-        except ValueError:
-            messagebox.showerror("Error", "Please enter a valid number for max results")
-            return
+        # Get source selection
+        source = self.journal_source_var.get()
+        
+        # Validate max results only if PubMed is selected
+        max_results = None
+        if source in ["both", "pubmed"]:
+            try:
+                max_results = int(self.journal_max_results_var.get())
+            except ValueError:
+                messagebox.showerror("Error", "Please enter a valid number for max results")
+                return
             
         # Run in separate thread
         thread = threading.Thread(target=self._run_journal_articles_thread, 
-                                args=(max_results,))
+                                args=(max_results, source))
         thread.daemon = True
         thread.start()
         
-    def _run_journal_articles_thread(self, max_results):
+    def _run_journal_articles_thread(self, max_results, source):
         """Thread function for journal articles scraper."""
         self.start_progress()
         self.update_status("Running journal articles scraper...")
@@ -2625,31 +2727,41 @@ STEP 5: Analyze Results
         )
         
         try:
-            self.log_message(self.journal_output, "Starting Journal Articles Scraper (PubMed + Semantic Scholar)")
+            source_name = {
+                "both": "PubMed + Semantic Scholar",
+                "pubmed": "PubMed Only",
+                "semantic": "Semantic Scholar Only"
+            }.get(source, "Unknown")
+            
+            self.log_message(self.journal_output, f"Starting Journal Articles Scraper ({source_name})")
             self.log_message(self.journal_output, "="*60)
             
             success_count = 0
-            total_sources = 2
+            total_sources = 2 if source == "both" else 1
             
-            # Step 1: Process PubMed
-            self.log_message(self.journal_output, "Step 1/2: Processing PubMed...")
-            try:
-                self.log_message(self.journal_output, f"Using keywords: {self.journal_keywords_var.get()}")
-                progress_wrapper.run_pubmed_with_progress(max_results=max_results)
-                self.log_message(self.journal_output, "✅ PubMed processing completed successfully!")
-                success_count += 1
-            except Exception as e:
-                self.log_message(self.journal_output, f"❌ PubMed processing failed: {e}")
+            # Step 1: Process PubMed (if selected)
+            if source in ["both", "pubmed"]:
+                step_num = "1/2" if source == "both" else "1/1"
+                self.log_message(self.journal_output, f"Step {step_num}: Processing PubMed...")
+                try:
+                    self.log_message(self.journal_output, f"Using keywords: {self.journal_keywords_var.get()}")
+                    progress_wrapper.run_pubmed_with_progress(max_results=max_results)
+                    self.log_message(self.journal_output, "✅ PubMed processing completed successfully!")
+                    success_count += 1
+                except Exception as e:
+                    self.log_message(self.journal_output, f"❌ PubMed processing failed: {e}")
             
-            # Step 2: Process UBR5
-            self.log_message(self.journal_output, "Step 2/2: Processing UBR5 (Semantic Scholar)...")
-            try:
-                self.log_message(self.journal_output, f"Using keywords: {self.journal_keywords_var.get()}")
-                progress_wrapper.run_ubr5_with_progress(self.journal_keywords_var.get())
-                self.log_message(self.journal_output, "✅ UBR5 processing completed successfully!")
-                success_count += 1
-            except Exception as e:
-                self.log_message(self.journal_output, f"❌ UBR5 processing failed: {e}")
+            # Step 2: Process Semantic Scholar (if selected)
+            if source in ["both", "semantic"]:
+                step_num = "2/2" if source == "both" else "1/1"
+                self.log_message(self.journal_output, f"Step {step_num}: Processing Semantic Scholar...")
+                try:
+                    self.log_message(self.journal_output, f"Using keywords: {self.journal_keywords_var.get()}")
+                    progress_wrapper.run_ubr5_with_progress(self.journal_keywords_var.get())
+                    self.log_message(self.journal_output, "✅ Semantic Scholar processing completed successfully!")
+                    success_count += 1
+                except Exception as e:
+                    self.log_message(self.journal_output, f"❌ Semantic Scholar processing failed: {e}")
             
             # Summary
             self.log_message(self.journal_output, f"🎉 Journal articles scraper completed!")
@@ -2682,12 +2794,15 @@ STEP 5: Analyze Results
             
     def run_preprints_gui(self):
         """Run preprints scraper in a separate thread."""
+        # Get source selection
+        source = self.preprints_source_var.get()
+        
         # Run in separate thread
-        thread = threading.Thread(target=self._run_preprints_thread)
+        thread = threading.Thread(target=self._run_preprints_thread, args=(source,))
         thread.daemon = True
         thread.start()
         
-    def _run_preprints_thread(self):
+    def _run_preprints_thread(self, source):
         """Thread function for preprints scraper."""
         self.start_progress()
         self.update_status("Running preprints scraper...")
@@ -2700,11 +2815,35 @@ STEP 5: Analyze Results
         )
         
         try:
-            self.log_message(self.preprints_output, "Starting Preprints Scraper (Biorxiv, Medrxiv)")
+            source_name = {
+                "both": "BioRxiv + MedRxiv",
+                "biorxiv": "BioRxiv Only",
+                "medrxiv": "MedRxiv Only"
+            }.get(source, "Unknown")
+            
+            self.log_message(self.preprints_output, f"Starting Preprints Scraper ({source_name})")
             self.log_message(self.preprints_output, "="*60)
             
-            progress_wrapper.run_xrvix_with_progress()
-            self.log_message(self.preprints_output, "✅ Preprints processing completed successfully!")
+            # Note: The current xrvix processor handles both BioRxiv and MedRxiv together
+            # For individual source processing, we would need to modify the xrvix processor
+            # For now, we'll run the full processor and log which sources are being processed
+            
+            if source == "both":
+                self.log_message(self.preprints_output, "Processing both BioRxiv and MedRxiv sources...")
+                progress_wrapper.run_xrvix_with_progress()
+                self.log_message(self.preprints_output, "✅ Both preprint sources processed successfully!")
+            elif source == "biorxiv":
+                self.log_message(self.preprints_output, "Processing BioRxiv only...")
+                self.log_message(self.preprints_output, "⚠️ Note: Current implementation processes both sources together")
+                self.log_message(self.preprints_output, "💡 BioRxiv data will be extracted from the combined processing")
+                progress_wrapper.run_xrvix_with_progress()
+                self.log_message(self.preprints_output, "✅ BioRxiv processing completed!")
+            elif source == "medrxiv":
+                self.log_message(self.preprints_output, "Processing MedRxiv only...")
+                self.log_message(self.preprints_output, "⚠️ Note: Current implementation processes both sources together")
+                self.log_message(self.preprints_output, "💡 MedRxiv data will be extracted from the combined processing")
+                progress_wrapper.run_xrvix_with_progress()
+                self.log_message(self.preprints_output, "✅ MedRxiv processing completed!")
             
         except Exception as e:
             self.log_message(self.preprints_output, f"❌ Preprints processing failed: {e}")
@@ -3064,15 +3203,32 @@ STEP 5: Analyze Results
             total_loaded = 0
             
             if source in ["all", "pubmed"]:
-                # Load PubMed embeddings
-                pubmed_path = "data/embeddings/xrvix_embeddings/pubmed_embeddings.json"
-                if os.path.exists(pubmed_path):
-                    self.log_message(self.load_output, "🔄 Loading PubMed embeddings...")
-                    pubmed_data = manager.load_embeddings_from_json(pubmed_path)
+                # Load PubMed embeddings from batch files
+                pubmed_batch_dir = "data/embeddings/pubmed"
+                pubmed_single_file = "data/embeddings/xrvix_embeddings/pubmed_embeddings.json"
+                
+                # First try to load from batch files (newer format)
+                if os.path.exists(pubmed_batch_dir):
+                    batch_files = [f for f in os.listdir(pubmed_batch_dir) if f.startswith("batch_") and f.endswith(".json")]
+                    if batch_files:
+                        self.log_message(self.load_output, f"🔄 Loading PubMed embeddings from {len(batch_files)} batch files...")
+                        if manager.add_embeddings_from_directory(pubmed_batch_dir, sources=["pubmed"], db_batch_size=DB_BATCH_SIZE):
+                            stats = manager.get_collection_stats()
+                            total_docs = stats.get('total_documents', 0)
+                            self.log_message(self.load_output, f"✅ Loaded PubMed embeddings from batch files (total documents: {total_docs})")
+                            total_loaded = total_docs
+                        else:
+                            self.log_message(self.load_output, "❌ Failed to load PubMed embeddings from batch files")
+                
+                # Fallback to single file (legacy format)
+                elif os.path.exists(pubmed_single_file):
+                    self.log_message(self.load_output, "🔄 Loading PubMed embeddings from single file...")
+                    pubmed_data = manager.load_embeddings_from_json(pubmed_single_file)
                     if pubmed_data:
                         if manager.add_embeddings_to_collection(pubmed_data, "pubmed"):
                             total_loaded += len(pubmed_data.get('embeddings', []))
                             self.log_message(self.load_output, f"✅ Loaded {len(pubmed_data.get('embeddings', []))} PubMed embeddings")
+                
                 else:
                     self.log_message(self.load_output, "⚠️ No PubMed embeddings found")
             

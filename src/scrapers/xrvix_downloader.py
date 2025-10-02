@@ -54,14 +54,22 @@ class XRXivDownloader:
             # Import paperscraper after installation
             from paperscraper.get_dumps import biorxiv
             
+            # Create a specific filename for the dump
+            timestamp = datetime.now().strftime("%Y-%m-%d")
+            dump_filename = f"biorxiv_{timestamp}.jsonl"
+            dump_path = os.path.join(self.server_dumps_dir, dump_filename)
+            
             logger.info("📥 Starting Biorxiv dump download (this may take ~1 hour)...")
-            biorxiv()
+            logger.info(f"💾 Saving to: {dump_path}")
+            
+            # Download with custom save path
+            biorxiv(save_path=dump_path)
             
             # Check if dump was created
-            biorxiv_files = [f for f in os.listdir(self.server_dumps_dir) if 'biorxiv' in f.lower()]
-            if biorxiv_files:
-                logger.info(f"✅ Biorxiv dump downloaded: {biorxiv_files[0]}")
-                return os.path.join(self.server_dumps_dir, biorxiv_files[0])
+            if os.path.exists(dump_path):
+                file_size = os.path.getsize(dump_path) / (1024 * 1024)  # Size in MB
+                logger.info(f"✅ Biorxiv dump downloaded: {dump_filename} ({file_size:.1f} MB)")
+                return dump_path
             else:
                 logger.error("❌ Biorxiv dump file not found after download")
                 return None
@@ -78,14 +86,22 @@ class XRXivDownloader:
             # Import paperscraper after installation
             from paperscraper.get_dumps import medrxiv
             
+            # Create a specific filename for the dump
+            timestamp = datetime.now().strftime("%Y-%m-%d")
+            dump_filename = f"medrxiv_{timestamp}.jsonl"
+            dump_path = os.path.join(self.server_dumps_dir, dump_filename)
+            
             logger.info("📥 Starting Medrxiv dump download (this may take ~30 minutes)...")
-            medrxiv()
+            logger.info(f"💾 Saving to: {dump_path}")
+            
+            # Download with custom save path
+            medrxiv(save_path=dump_path)
             
             # Check if dump was created
-            medrxiv_files = [f for f in os.listdir(self.server_dumps_dir) if 'medrxiv' in f.lower()]
-            if medrxiv_files:
-                logger.info(f"✅ Medrxiv dump downloaded: {medrxiv_files[0]}")
-                return os.path.join(self.server_dumps_dir, medrxiv_files[0])
+            if os.path.exists(dump_path):
+                file_size = os.path.getsize(dump_path) / (1024 * 1024)  # Size in MB
+                logger.info(f"✅ Medrxiv dump downloaded: {dump_filename} ({file_size:.1f} MB)")
+                return dump_path
             else:
                 logger.error("❌ Medrxiv dump file not found after download")
                 return None
